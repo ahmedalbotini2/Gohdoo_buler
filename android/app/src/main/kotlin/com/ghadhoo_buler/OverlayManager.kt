@@ -1,4 +1,4 @@
-package com.example.safety_screen
+package com.ghadhoo_buler
 
 import android.content.Context
 import android.graphics.Color

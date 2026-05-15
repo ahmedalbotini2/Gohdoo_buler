@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'ai_analyzer.dart'; // استيراد المنطق
 
 class SafeScreenHome extends StatefulWidget {
   const SafeScreenHome({super.key});
@@ -9,69 +9,55 @@ class SafeScreenHome extends StatefulWidget {
 }
 
 class _SafeScreenHomeState extends State<SafeScreenHome> {
-  static const _channel = MethodChannel('com.example.safescreen/monitor');
+  final SafeScreenController _controller = SafeScreenController();
   bool _isActive = false;
 
   @override
   void initState() {
     super.initState();
-    _checkStatus();
+    _initEngine();
   }
 
-  Future<void> _checkStatus() async {
-    try {
-      final bool isActive = await _channel.invokeMethod('isMonitoring');
-      setState(() {
-        _isActive = isActive;
-      });
-    } on PlatformException catch (e) {
-      debugPrint("Failed to get status: '${e.message}'.");
-    }
+  Future<void> _initEngine() async {
+    await _controller.initialize(); // تحميل النموذج والربط
+    _refreshStatus();
+  }
+
+  Future<void> _refreshStatus() async {
+    bool status = await _controller.checkMonitoringStatus();
+    setState(() => _isActive = status);
   }
 
   Future<void> _toggleProtection() async {
-    try {
-      if (_isActive) {
-        await _channel.invokeMethod('stopMonitoring');
-      } else {
-        await _channel.invokeMethod('startMonitoring');
-      }
-      await _checkStatus();
-    } on PlatformException catch (e) {
-      debugPrint("Failed to toggle protection: '${e.message}'.");
+    if (_isActive) {
+      await _controller.stopMonitoring();
+    } else {
+      await _controller.startMonitoring();
     }
+    _refreshStatus();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('SafeScreen'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-      ),
+      appBar: AppBar(title: const Text('Ghadhoo - غدو')),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
+          children: [
             Icon(
               _isActive ? Icons.security : Icons.gpp_maybe,
               size: 100,
               color: _isActive ? Colors.green : Colors.red,
             ),
             const SizedBox(height: 20),
-            Text(
-              'Status: ${_isActive ? "Active" : "Inactive"}',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
+            Text('الحالة: ${_isActive ? "نشط" : "متوقف"}', style: const TextStyle(fontSize: 22)),
             const SizedBox(height: 40),
             ElevatedButton.icon(
               onPressed: _toggleProtection,
               icon: Icon(_isActive ? Icons.stop : Icons.play_arrow),
-              label: Text(_isActive ? 'Stop Protection' : 'Start Protection'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-                textStyle: const TextStyle(fontSize: 18),
-              ),
+              label: Text(_isActive ? 'إيقاف الحماية' : 'تفعيل الحماية'),
+              style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16)),
             ),
           ],
         ),

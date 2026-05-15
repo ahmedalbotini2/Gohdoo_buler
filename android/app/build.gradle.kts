@@ -1,39 +1,43 @@
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
 android {
-    namespace = "com.example.safety_screen"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    namespace = "com.ghadhoo_buler"
+    compileSdk = 36
+    ndkVersion = "27.2.12479018"
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        // تفعيل الـ Desugaring لدعم ميزات Java الحديثة على الأجهزة القديمة
+        isCoreLibraryDesugaringEnabled = true 
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_11.toString()
+        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.safety_screen"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        applicationId = "com.ghadhoo_buler"
+        minSdk = 23 // متوافق مع متطلبات TFLite
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
-
+configurations.all {
+    exclude(group = "com.google.ai.edge.litert", module = "litert")
+    exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+    exclude(group = "com.google.ai.edge.litert", module = "litert-runtime")
+}
+    // --- الإضافة المهمة جداً لملفات الذكاء الاصطناعي ---
+ aaptOptions {
+        noCompress("tflite") 
+    }
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -41,4 +45,24 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // دعم المكتبات الحديثة
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
+    // حل تعارض الإصدارات (تأكد من توحيد الإصدار لـ 1.9.20 لضمان الاستقرار)
+    constraints {
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.20") {
+            because("تحديث وتوحيد الإصدار لحل تعارض مكتبة network_info_plus")
+        }
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.20") {
+            because("تحديث وتوحيد الإصدار لحل تعارض مكتبة network_info_plus")
+        }
+    }
+
+    // مكتبات TensorFlow Lite الأساسية للتحليل المحلي
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")//2.14.0
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-api:2.16.1")//2.14.0
 }

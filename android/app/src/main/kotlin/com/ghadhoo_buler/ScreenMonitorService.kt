@@ -1,4 +1,4 @@
-package com.example.safety_screen
+package com.ghadhoo_buler
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -19,6 +19,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import io.flutter.plugin.common.MethodChannel
 
 class ScreenMonitorService : Service() {
 
@@ -36,16 +37,18 @@ class ScreenMonitorService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var overlayManager: OverlayManager? = null
-    private val analyzer = MockAIAnalyzer()
+    
+    // تعريف المحلل (اختياري إذا كنت ستعتمد كلياً على فلاتر، ولكن يفضل وجوده للتحقق)
+    private var nsfwAnalyzer: NSFWAnalyzer? = null
     
     private val handler = Handler(Looper.getMainLooper())
-    private val captureIntervalMs = 3000L
+    private val captureIntervalMs = 3000L // التقاط كل 3 ثوانٍ لتوفير البطارية
     private var isCapturing = false
 
     private val captureRunnable = object : Runnable {
         override fun run() {
-            captureFrame()
             if (isCapturing) {
+                captureFrame()
                 handler.postDelayed(this, captureIntervalMs)
             }
         }
@@ -54,14 +57,17 @@ class ScreenMonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_START) {
-            val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-            val resultData = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
-            if (resultData != null) {
-                startMonitoring(resultCode, resultData)
+        when (intent?.action) {
+            ACTION_START -> {
+                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+                val resultData = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+                if (resultData != null) {
+                    startMonitoring(resultCode, resultData)
+                }
             }
-        } else if (intent?.action == ACTION_STOP) {
-            stopMonitoring()
+            ACTION_STOP -> {
+                stopMonitoring()
+            }
         }
         return START_NOT_STICKY
     }
@@ -71,14 +77,16 @@ class ScreenMonitorService : Service() {
 
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "safescreen_channel")
-            .setContentTitle("SafeScreen Active")
-            .setContentText("Monitoring screen for unsafe content.")
-            .setSmallIcon(android.R.drawable.ic_dialog_info) // built-in fallback
+            .setContentTitle("غدو - الحماية نشطة")
+            .setContentText("يتم الآن مراقبة الشاشة لحمايتك.")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
+        
         startForeground(1, notification)
 
         overlayManager = OverlayManager(this)
+        nsfwAnalyzer = NSFWAnalyzer(this)
 
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, resultData)
@@ -88,14 +96,26 @@ class ScreenMonitorService : Service() {
         isMonitoring = true
         isCapturing = true
         handler.post(captureRunnable)
+        
+        Log.d("Ghadhoo", "Screen monitoring service started.")
     }
 
     private fun setupVirtualDisplay() {
         val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
-        windowManager.defaultDisplay.getMetrics(metrics)
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val windowMetrics = windowManager.currentWindowMetrics
+            val bounds = windowMetrics.bounds
+            metrics.widthPixels = bounds.width()
+            metrics.heightPixels = bounds.height()
+            metrics.densityDpi = resources.configuration.densityDpi
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getMetrics(metrics)
+        }
 
-        // Lower resolution for better performance
+        // تقليل الدقة للنصف لتحسين أداء الذكاء الاصطناعي وتقليل استهلاك الذاكرة
         val width = metrics.widthPixels / 2
         val height = metrics.heightPixels / 2
         val density = metrics.densityDpi
@@ -107,26 +127,53 @@ class ScreenMonitorService : Service() {
             width, height, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface,
-            null, handler
+            null, null
         )
     }
 
     private fun captureFrame() {
         val image = imageReader?.acquireLatestImage()
         if (image != null) {
-            val isUnsafe = analyzer.analyzeImage(image)
-            image.close()
-            
-            if (isUnsafe) {
-                Log.d("SafeScreen", "Unsafe content detected!")
-                overlayManager?.showOverlay()
+            try {
+                val planes = image.planes
+                val buffer = planes[0].buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
                 
-                // Auto-remove overlay after 4 seconds (for demo purposes)
-                handler.postDelayed({
-                    overlayManager?.removeOverlay()
-                }, 4000)
-            } else {
-                Log.d("SafeScreen", "Content safe.")
+                val width = image.width
+                val height = image.height
+
+                // إرسال الإطار إلى جانب Flutter للتحليل عبر SafeScreenController
+                MainActivity.methodChannel?.invokeMethod(
+                    "processFrameInFlutter",
+                    mapOf(
+                        "bytes" to bytes,
+                        "width" to width,
+                        "height" to height
+                    ),
+                    object : MethodChannel.Result {
+                        override fun success(result: Any?) {
+                            val shouldBlock = result as? Boolean ?: false
+                            if (shouldBlock) {
+                                overlayManager?.showOverlay()
+                            } else {
+                                overlayManager?.removeOverlay()
+                            }
+                        }
+
+                        override fun error(errorCode: String, errorMessage: String?, p2: Any?) {
+                            Log.e("Ghadhoo", "Flutter error: $errorMessage")
+                        }
+
+                        override fun notImplemented() {
+                            Log.e("Ghadhoo", "Method not implemented in Flutter")
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e("Ghadhoo", "Error capturing frame: ${e.message}")
+            } finally {
+                image.close() // ضروري جداً لتجنب تسريب الذاكرة
             }
         }
     }
@@ -135,23 +182,26 @@ class ScreenMonitorService : Service() {
         isCapturing = false
         isMonitoring = false
         handler.removeCallbacks(captureRunnable)
+        
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
         overlayManager?.removeOverlay()
+        
         stopForeground(true)
         stopSelf()
+        Log.d("Ghadhoo", "Screen monitoring service stopped.")
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 "safescreen_channel",
-                "SafeScreen Background Service",
+                "Ghadhoo Protection Service",
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(serviceChannel)
+            manager?.createNotificationChannel(serviceChannel)
         }
     }
 
