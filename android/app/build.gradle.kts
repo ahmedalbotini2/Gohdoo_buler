@@ -10,32 +10,41 @@ android {
     ndkVersion = "27.2.12479018"
 
     compileOptions {
-        // تفعيل الـ Desugaring لدعم ميزات Java الحديثة على الأجهزة القديمة
-        isCoreLibraryDesugaringEnabled = true 
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        }
     }
 
     defaultConfig {
         applicationId = "com.ghadhoo_buler"
-        minSdk = 23 // متوافق مع متطلبات TFLite
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
-configurations.all {
-    exclude(group = "com.google.ai.edge.litert", module = "litert")
-    exclude(group = "com.google.ai.edge.litert", module = "litert-api")
-    exclude(group = "com.google.ai.edge.litert", module = "litert-runtime")
-}
-    // --- الإضافة المهمة جداً لملفات الذكاء الاصطناعي ---
- aaptOptions {
-        noCompress("tflite") 
+
+    packaging {
+        jniLibs {
+            pickFirsts += setOf(
+                "lib/x86/libtensorflowlite_jni.so",
+                "lib/x86_64/libtensorflowlite_jni.so",
+                "lib/armeabi-v7a/libtensorflowlite_jni.so",
+                "lib/arm64-v8a/libtensorflowlite_jni.so"
+            )
+        }
     }
+
+    @Suppress("DEPRECATION")
+    aaptOptions {
+        noCompress("tflite")
+    }
+
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
@@ -48,21 +57,10 @@ flutter {
 }
 
 dependencies {
-    // دعم المكتبات الحديثة
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 
-    // حل تعارض الإصدارات (تأكد من توحيد الإصدار لـ 1.9.20 لضمان الاستقرار)
-    constraints {
-        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.20") {
-            because("تحديث وتوحيد الإصدار لحل تعارض مكتبة network_info_plus")
-        }
-        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.20") {
-            because("تحديث وتوحيد الإصدار لحل تعارض مكتبة network_info_plus")
-        }
-    }
-
-    // مكتبات TensorFlow Lite الأساسية للتحليل المحلي
-    implementation("org.tensorflow:tensorflow-lite:2.16.1")//2.14.0
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-    implementation("org.tensorflow:tensorflow-lite-api:2.16.1")//2.14.0
+    // ✅ الإصلاح: litert:2.1.4 تحتوي بداخلها على litert-support تلقائياً
+    // إضافة litert-support:1.4.2 بشكل منفصل يسبب Duplicate Classes
+    // لذا نستخدم litert فقط بدون litert-support
+    implementation("com.google.ai.edge.litert:litert:2.1.4")
 }

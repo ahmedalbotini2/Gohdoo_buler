@@ -1,3 +1,14 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // ✅ تحديد Kotlin 2.3.0 مباشرة بدون ext - هذه الصيغة الصحيحة في .kts
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
+    }
+}
+
 allprojects {
     repositories {
         google()
