@@ -35,7 +35,7 @@ class MainActivity : FlutterActivity() {
                 "isMonitoring" -> result.success(ScreenMonitorService.isMonitoring)
                 "setBlurStrength" -> {
                     val value = call.argument<Double>("value")?.toFloat() ?: 20f
-                    ScreenMonitorService.setBlurStrength(value)
+                  //  ScreenMonitorService.setBlurStrength(value)
                     result.success(null)
                 }
                 else -> result.notImplemented()

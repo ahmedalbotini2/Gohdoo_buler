@@ -113,7 +113,7 @@ class ScreenMonitorService : Service() {
         Log.d("Ghadhoo", "تم تشغيل خدمة المراقبة بنجاح.")
     }
 
-    private fun setupVirtualDisplay() {
+    private fun setupVirtualDisplay() {//
         val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
 
