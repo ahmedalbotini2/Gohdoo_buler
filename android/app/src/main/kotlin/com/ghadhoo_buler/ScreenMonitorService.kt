@@ -6,7 +6,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -21,35 +20,44 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class ScreenMonitorService : Service() {
 
     companion object {
-        const val ACTION_START = "ACTION_START"
-        const val ACTION_STOP = "ACTION_STOP"
+        const val ACTION_START      = "ACTION_START"
+        const val ACTION_STOP       = "ACTION_STOP"
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_RESULT_DATA = "EXTRA_RESULT_DATA"
 
         var isMonitoring = false
             private set
 
-        // ✅ تحديث شدة الـ Blur من Flutter مباشرة
-        private var overlayManagerRef: OverlayManager? = null
+        private var overlayRef: OverlayManager? = null
 
         fun setBlurStrength(value: Float) {
-            overlayManagerRef?.blurRadius = value.coerceIn(1f, 25f)
+            overlayRef?.updateBlurRadius(value)
         }
     }
 
     private var mediaProjection: MediaProjection? = null
-    private var virtualDisplay: VirtualDisplay? = null
-    private var imageReader: ImageReader? = null
-    private var overlayManager: OverlayManager? = null
-    private var localAiAnalyzer: LocalAiAnalyzer? = null
+    private var virtualDisplay:  VirtualDisplay?  = null
+    private var imageReader:     ImageReader?      = null
+    private var overlayManager:  OverlayManager?  = null
+    private var analyzer:        ContentAnalyzer? = null
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val captureIntervalMs = 1500L
-    private var isCapturing = false
+    private val serviceScope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val handler            = Handler(Looper.getMainLooper())
+    private val captureIntervalMs  = 1500L
+    private var isCapturing        = false
+
+    // ── عداد التأكيد: N فريم آمن متتالي قبل رفع الـ Blur ───────────────────
+    private val safeFramesRequired = 3
+    private var safeFrameCount     = 0
+    private var isCurrentlyBlurred = false
 
     private val captureRunnable = object : Runnable {
         override fun run() {
@@ -66,12 +74,10 @@ class ScreenMonitorService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA)
-                }
+                val resultData: Intent? =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                        intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+                    else @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 if (resultData != null) startMonitoring(resultCode, resultData)
             }
             ACTION_STOP -> stopMonitoring()
@@ -85,162 +91,121 @@ class ScreenMonitorService : Service() {
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "safescreen_channel")
             .setContentTitle("غدو - الحماية نشطة")
-            .setContentText("يتم الآن تحليل محتوى الشاشة محلياً.")
+            .setContentText("يتم تحليل محتوى الشاشة محلياً.")
             .setSmallIcon(android.R.drawable.ic_secure)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .build()
+            .setOngoing(true).build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(1, notification)
-        }
+        else startForeground(1, notification)
 
         overlayManager = OverlayManager(this)
-        overlayManagerRef = overlayManager  // ✅ ربط المرجع للتحكم من Flutter
-        localAiAnalyzer = LocalAiAnalyzer(this)
+        overlayRef     = overlayManager
+        analyzer       = LocalAiAnalyzer(this)
 
-        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = projectionManager.getMediaProjection(resultCode, resultData)
-
+        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjection = pm.getMediaProjection(resultCode, resultData)
         setupVirtualDisplay()
 
         isMonitoring = true
-        isCapturing = true
+        isCapturing  = true
         handler.post(captureRunnable)
-
-        Log.d("Ghadhoo", "تم تشغيل خدمة المراقبة بنجاح.")
+        Log.d("Ghadhoo", "✅ الخدمة تعمل")
     }
 
-    private fun setupVirtualDisplay() {//
-        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private fun setupVirtualDisplay() {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            metrics.widthPixels = bounds.width()
-            metrics.heightPixels = bounds.height()
-            metrics.densityDpi = resources.configuration.densityDpi
+            val b = wm.currentWindowMetrics.bounds
+            metrics.widthPixels  = b.width()
+            metrics.heightPixels = b.height()
+            metrics.densityDpi   = resources.configuration.densityDpi
         } else {
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.getMetrics(metrics)
+            @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(metrics)
         }
 
-        val width = 480
-        val height = 800
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
         val density = metrics.densityDpi
 
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-
+        // ✅ ImageReader للتحليل فقط — لم نعد نحتاج الصورة للـ Overlay
+        imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "GhadhooCapture",
-            width, height, density,
+            "GhadhooCapture", screenW, screenH, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null, null
+            imageReader?.surface, null, null
         )
     }
 
     private fun captureFrame() {
         val image = imageReader?.acquireLatestImage() ?: return
-
         try {
             if (image.planes.isEmpty()) return
 
-            val isUnsafe = localAiAnalyzer?.analyzeImage(image) ?: false
+            val localAnalyzer = analyzer as? LocalAiAnalyzer
+            // نحتاج الـ Bitmap للتحليل فقط — لا نمرره للـ Overlay
+            val screenshot = localAnalyzer?.imageToBitmap(image) ?: return
 
-            if (isUnsafe) {
-                Log.w("Ghadhoo", "محتوى غير آمن! جاري التضبيب...")
+            serviceScope.launch {
+                val result = analyzer?.analyze(screenshot) ?: return@launch
+                // تحرير الـ Bitmap فور انتهاء التحليل — لم نعد نحتاجه
+                screenshot.recycle()
 
-                // ✅ تحويل الـ Image إلى Bitmap وتمريره للـ OverlayManager للـ Blur
-                val screenshot = imageToBitmap(image)
-                if (screenshot != null) {
-                    overlayManager?.showBlurOverlay(screenshot)
+                if (result.isUnsafe) {
+                    // ── محتوى سيء → أضف طبقة Blur وأعد العداد ──────────────
+                    safeFrameCount     = 0
+                    isCurrentlyBlurred = true
+                    overlayManager?.showBlurLayer()
+                    Log.w("Ghadhoo", "🚨 محتوى غير آمن — Blur مفعّل")
+
+                } else if (isCurrentlyBlurred) {
+                    // ── محتوى آمن + Blur ظاهر → ابدأ العد ───────────────────
+                    safeFrameCount++
+                    Log.d("Ghadhoo", "✅ فريم آمن $safeFrameCount/$safeFramesRequired")
+
+                    if (safeFrameCount >= safeFramesRequired) {
+                        safeFrameCount     = 0
+                        isCurrentlyBlurred = false
+                        overlayManager?.removeOverlay()
+                        Log.d("Ghadhoo", "✅ تأكد اختفاء المحتوى — رُفع الـ Blur")
+                    }
                 }
-            } else {
-                overlayManager?.removeOverlay()
             }
-
         } catch (e: Exception) {
-            Log.e("Ghadhoo", "خطأ أثناء التحليل: ${e.message}")
+            Log.e("Ghadhoo", "❌ خطأ: ${e.message}")
         } finally {
             image.close()
         }
     }
 
-    // تحويل Image إلى Bitmap مع معالجة الـ Row Padding بشكل صحيح
-    private fun imageToBitmap(image: android.media.Image): Bitmap? {
-        return try {
-            val plane = image.planes[0]
-            val buffer = plane.buffer
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val width = image.width
-            val height = image.height
-
-            // ✅ الإصلاح: إنشاء Bitmap بالأبعاد الصحيحة بدون padding
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-
-            // نسخ البيانات صف بصف مع تخطي الـ padding في نهاية كل صف
-            val rowData = ByteArray(rowStride)
-            val pixels = IntArray(width * height)
-            var pixelIndex = 0
-
-            for (row in 0 until height) {
-                buffer.position(row * rowStride)
-                buffer.get(rowData, 0, minOf(rowStride, buffer.remaining()))
-
-                for (col in 0 until width) {
-                    val byteIndex = col * pixelStride
-                    val r = rowData[byteIndex].toInt() and 0xFF
-                    val g = rowData[byteIndex + 1].toInt() and 0xFF
-                    val b = rowData[byteIndex + 2].toInt() and 0xFF
-                    val a = if (pixelStride >= 4) rowData[byteIndex + 3].toInt() and 0xFF else 255
-                    pixels[pixelIndex++] = (a shl 24) or (r shl 16) or (g shl 8) or b
-                }
-            }
-
-            bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            bitmap
-        } catch (e: Exception) {
-            Log.e("Ghadhoo", "فشل تحويل Image: ${e.message}")
-            null
-        }
-    }
-
     private fun stopMonitoring() {
-        isCapturing = false
-        isMonitoring = false
+        isCapturing        = false
+        isMonitoring       = false
+        safeFrameCount     = 0
+        isCurrentlyBlurred = false
         handler.removeCallbacks(captureRunnable)
-
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
         overlayManager?.removeOverlay()
-        overlayManagerRef = null
-        localAiAnalyzer?.close()
-        localAiAnalyzer = null
-
+        overlayRef = null
+        analyzer?.close()
+        analyzer = null
         stopForeground(true)
         stopSelf()
-        Log.d("Ghadhoo", "تم إيقاف الخدمة وتحرير جميع الموارد.")
+        Log.d("Ghadhoo", "✅ الخدمة توقفت")
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                "safescreen_channel",
-                "Ghadhoo Protection Service",
-                NotificationManager.IMPORTANCE_LOW
+            val ch = NotificationChannel(
+                "safescreen_channel", "Ghadhoo Protection", NotificationManager.IMPORTANCE_LOW
             )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(serviceChannel)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(ch)
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        stopMonitoring()
-    }
+    override fun onDestroy() { super.onDestroy(); stopMonitoring() }
 }
