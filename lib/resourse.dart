@@ -1,4 +1,3 @@
-class modles {
-  static const String tf_modle = 'assets/models/quantized_model.tflite';
- // static const String labelPath = 'assets/models/labels.txt';
+class ImageAppResources {
+static const String blurTest = 'assets/images/test_blur_image.jpg';
 }

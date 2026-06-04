@@ -19,7 +19,6 @@ pluginManagement {
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "8.7.0" apply false
-    // ✅ تغيير من 2.1.10 إلى 2.3.0 ليتوافق مع LiteRT 2.1.4
     id("org.jetbrains.kotlin.android") version "2.3.0" apply false
 }
 

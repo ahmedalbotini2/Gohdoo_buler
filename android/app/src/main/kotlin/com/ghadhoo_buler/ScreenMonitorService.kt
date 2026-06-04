@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -23,6 +24,7 @@ import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class ScreenMonitorService : Service() {
@@ -36,34 +38,38 @@ class ScreenMonitorService : Service() {
         var isMonitoring = false
             private set
 
-        private var overlayRef: OverlayManager? = null
-
-        fun setBlurStrength(value: Float) {
-            overlayRef?.updateBlurRadius(value)
-        }
+        private var overlayManagerRef: OverlayManager? = null
+        fun setBlurRadius(radius: Float) { overlayManagerRef?.blurRadius = radius }
+        fun setOverlayColor(color: Int)  { overlayManagerRef?.overlayColor = color }
     }
 
-    private var mediaProjection: MediaProjection? = null
-    private var virtualDisplay:  VirtualDisplay?  = null
-    private var imageReader:     ImageReader?      = null
-    private var overlayManager:  OverlayManager?  = null
-    private var analyzer:        ContentAnalyzer? = null
+    // ── متغيرات مشتركة ────────────────────────────────────────────────────
+    private var mediaProjection: MediaProjection?   = null
+    private var overlayManager: OverlayManager?     = null
+    private var localAiAnalyzer: LocalAiAnalyzer?   = null
+    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val handler      = Handler(Looper.getMainLooper())
+    private val captureMs    = 300L
+    private var isCapturing  = false
+    private val safeRequired = 10
+    private var safeCount    = 0
 
-    private val serviceScope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val handler            = Handler(Looper.getMainLooper())
-    private val captureIntervalMs  = 1500L
-    private var isCapturing        = false
+    // ── Android 11-: متغيرات خاصة ────────────────────────────────────────
+    private var virtualDisplay11: VirtualDisplay? = null
+    private var imageReader11: ImageReader?       = null
 
-    // ── عداد التأكيد: N فريم آمن متتالي قبل رفع الـ Blur ───────────────────
-    private val safeFramesRequired = 3
-    private var safeFrameCount     = 0
-    private var isCurrentlyBlurred = false
+    // ── Android 12+: متغيرات خاصة (reader ثانٍ بدون overlay) ─────────────
+    private var virtualDisplay12: VirtualDisplay? = null   // عادي مع overlay
+    private var imageReader12Clean: ImageReader?  = null   // بدون overlay للتحليل
+    private var virtualDisplay12Clean: VirtualDisplay? = null
+
+    private val isA12 = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
     private val captureRunnable = object : Runnable {
         override fun run() {
             if (isCapturing) {
                 captureFrame()
-                handler.postDelayed(this, captureIntervalMs)
+                handler.postDelayed(this, captureMs)
             }
         }
     }
@@ -73,12 +79,11 @@ class ScreenMonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val resultData: Intent? =
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                        intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-                    else @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_RESULT_DATA)
-                if (resultData != null) startMonitoring(resultCode, resultData)
+                val code = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+                val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_RESULT_DATA)
+                if (data != null) startMonitoring(code, data)
             }
             ACTION_STOP -> stopMonitoring()
         }
@@ -87,122 +92,164 @@ class ScreenMonitorService : Service() {
 
     private fun startMonitoring(resultCode: Int, resultData: Intent) {
         if (isMonitoring) return
-
         createNotificationChannel()
-        val notification = NotificationCompat.Builder(this, "safescreen_channel")
-            .setContentTitle("غدو - الحماية نشطة")
-            .setContentText("يتم تحليل محتوى الشاشة محلياً.")
+
+        val notif = NotificationCompat.Builder(this, "safescreen_channel")
+            .setContentTitle("غُضُّوا — الحماية نشطة")
+            .setContentText("يتم تحليل الشاشة بالذكاء الاصطناعي المحلي.")
             .setSmallIcon(android.R.drawable.ic_secure)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true).build()
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOngoing(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        else startForeground(1, notification)
+            startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        else
+            startForeground(1, notif)
 
-        overlayManager = OverlayManager(this)
-        overlayRef     = overlayManager
-        analyzer       = LocalAiAnalyzer(this)
+        overlayManager    = OverlayManager(this)
+        overlayManagerRef = overlayManager
+        localAiAnalyzer   = LocalAiAnalyzer(this)
 
-        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = pm.getMediaProjection(resultCode, resultData)
-        setupVirtualDisplay()
+        val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjection = projMgr.getMediaProjection(resultCode, resultData)
+
+        if (isA12) setupVirtualDisplay12() else setupVirtualDisplay11()
 
         isMonitoring = true
         isCapturing  = true
         handler.post(captureRunnable)
-        Log.d("Ghadhoo", "✅ الخدمة تعمل")
+        Log.d("Ghadhoo", "✅ الخدمة تعمل — ${if (isA12) "Android 12+" else "Android 11-"}")
     }
 
-    private fun setupVirtualDisplay() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val b = wm.currentWindowMetrics.bounds
-            metrics.widthPixels  = b.width()
-            metrics.heightPixels = b.height()
-            metrics.densityDpi   = resources.configuration.densityDpi
-        } else {
-            @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(metrics)
-        }
-
-        val screenW = metrics.widthPixels
-        val screenH = metrics.heightPixels
-        val density = metrics.densityDpi
-
-        // ✅ ImageReader للتحليل فقط — لم نعد نحتاج الصورة للـ Overlay
-        imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "GhadhooCapture", screenW, screenH, density,
+    // ════════════════════════════════════════════════════════════════════════
+    // Android 11-: VirtualDisplay واحد بسيط
+    // ════════════════════════════════════════════════════════════════════════
+    private fun setupVirtualDisplay11() {
+        val density = getDensity()
+        imageReader11 = ImageReader.newInstance(480, 800, PixelFormat.RGBA_8888, 2)
+        virtualDisplay11 = mediaProjection?.createVirtualDisplay(
+            "GhadhooCapture11", 480, 800, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface, null, null
+            imageReader11?.surface, null, null
         )
+        Log.d("Ghadhoo", "✅ VirtualDisplay11 جاهز")
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // Android 12+: VirtualDisplay نظيف (flag=0) للتحليل فقط
+    // TYPE_APPLICATION_OVERLAY لا يظهر في VirtualDisplay بدون FLAG_AUTO_MIRROR
+    // لذلك الـ reader النظيف يرى المحتوى الحقيقي بدون الـ blur overlay
+    // ════════════════════════════════════════════════════════════════════════
+    private fun setupVirtualDisplay12() {
+        val density = getDensity()
+
+        // Reader نظيف للتحليل — بدون FLAG_AUTO_MIRROR لا يرى الـ overlay
+        imageReader12Clean = ImageReader.newInstance(480, 800, PixelFormat.RGBA_8888, 2)
+        virtualDisplay12Clean = mediaProjection?.createVirtualDisplay(
+            "GhadhooCapture12Clean", 480, 800, density,
+            0, // ← لا flags — لا يعكس الـ overlay
+            imageReader12Clean?.surface, null, null
+        )
+        Log.d("Ghadhoo", "✅ VirtualDisplay12Clean جاهز (بدون overlay)")
+    }
+
+    private fun getDensity(): Int {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+            resources.configuration.densityDpi
+        else {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION") wm.defaultDisplay.getMetrics(metrics)
+            metrics.densityDpi
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // captureFrame: يختار الـ reader المناسب حسب الإصدار
+    // ════════════════════════════════════════════════════════════════════════
     private fun captureFrame() {
-        val image = imageReader?.acquireLatestImage() ?: return
+        val image = if (isA12)
+            imageReader12Clean?.acquireLatestImage()   // ← Android 12: بدون overlay
+        else
+            imageReader11?.acquireLatestImage()        // ← Android 11: عادي
+
+        image ?: return
+
         try {
             if (image.planes.isEmpty()) return
+            val bitmap: Bitmap = localAiAnalyzer?.imageToBitmap(image) ?: return
 
-            val localAnalyzer = analyzer as? LocalAiAnalyzer
-            // نحتاج الـ Bitmap للتحليل فقط — لا نمرره للـ Overlay
-            val screenshot = localAnalyzer?.imageToBitmap(image) ?: return
+            // التحقق من صحة الـ bitmap قبل التحليل (يمنع overflow)
+            if (bitmap.width <= 0 || bitmap.height <= 0 || bitmap.isRecycled) {
+                bitmap.recycle()
+                return
+            }
 
             serviceScope.launch {
-                val result = analyzer?.analyze(screenshot) ?: return@launch
-                // تحرير الـ Bitmap فور انتهاء التحليل — لم نعد نحتاجه
-                screenshot.recycle()
-
-                if (result.isUnsafe) {
-                    // ── محتوى سيء → أضف طبقة Blur وأعد العداد ──────────────
-                    safeFrameCount     = 0
-                    isCurrentlyBlurred = true
-                    overlayManager?.showBlurLayer()
-                    Log.w("Ghadhoo", "🚨 محتوى غير آمن — Blur مفعّل")
-
-                } else if (isCurrentlyBlurred) {
-                    // ── محتوى آمن + Blur ظاهر → ابدأ العد ───────────────────
-                    safeFrameCount++
-                    Log.d("Ghadhoo", "✅ فريم آمن $safeFrameCount/$safeFramesRequired")
-
-                    if (safeFrameCount >= safeFramesRequired) {
-                        safeFrameCount     = 0
-                        isCurrentlyBlurred = false
-                        overlayManager?.removeOverlay()
-                        Log.d("Ghadhoo", "✅ تأكد اختفاء المحتوى — رُفع الـ Blur")
+                try {
+                    val isUnsafe = localAiAnalyzer?.analyze(bitmap)?.isUnsafe ?: false
+                    if (isUnsafe) {
+                        safeCount = 0
+                        overlayManager?.showOverlay()
+                    } else {
+                        safeCount++
+                        if (safeCount >= safeRequired)
+                            overlayManager?.removeOverlay()
                     }
+                } finally {
+                    if (!bitmap.isRecycled) bitmap.recycle()
                 }
             }
         } catch (e: Exception) {
-            Log.e("Ghadhoo", "❌ خطأ: ${e.message}")
+            Log.e("Ghadhoo", "❌ captureFrame: ${e.message}")
         } finally {
             image.close()
         }
     }
 
     private fun stopMonitoring() {
-        isCapturing        = false
-        isMonitoring       = false
-        safeFrameCount     = 0
-        isCurrentlyBlurred = false
+        isCapturing  = false
+        isMonitoring = false
+        safeCount    = 0
         handler.removeCallbacks(captureRunnable)
-        virtualDisplay?.release()
-        imageReader?.close()
+        serviceScope.cancel()
+
+        // تحرير Android 11
+        virtualDisplay11?.release()
+        imageReader11?.close()
+        virtualDisplay11 = null
+        imageReader11    = null
+
+        // تحرير Android 12
+        virtualDisplay12?.release()
+        virtualDisplay12Clean?.release()
+        imageReader12Clean?.close()
+        virtualDisplay12      = null
+        virtualDisplay12Clean = null
+        imageReader12Clean    = null
+
         mediaProjection?.stop()
+        mediaProjection = null
+
         overlayManager?.removeOverlay()
-        overlayRef = null
-        analyzer?.close()
-        analyzer = null
+        localAiAnalyzer?.close()
+        localAiAnalyzer   = null
+        overlayManagerRef = null
+        overlayManager    = null
+
         stopForeground(true)
         stopSelf()
-        Log.d("Ghadhoo", "✅ الخدمة توقفت")
+        Log.d("Ghadhoo", "✅ الخدمة أوقفت")
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(
-                "safescreen_channel", "Ghadhoo Protection", NotificationManager.IMPORTANCE_LOW
-            )
+                "safescreen_channel", "غُضُّوا — حارس البصر",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "إشعار الحماية النشطة"; setShowBadge(false) }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(ch)
         }
     }

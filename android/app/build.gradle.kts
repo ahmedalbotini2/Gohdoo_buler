@@ -56,11 +56,12 @@ flutter {
     source = "../.."
 }
 
+// ✅ JitPack هنا على مستوى الـ project وليس settings — يتوافق مع Flutter
+repositories {
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-
-    // ✅ الإصلاح: litert:2.1.4 تحتوي بداخلها على litert-support تلقائياً
-    // إضافة litert-support:1.4.2 بشكل منفصل يسبب Duplicate Classes
-    // لذا نستخدم litert فقط بدون litert-support
     implementation("com.google.ai.edge.litert:litert:2.1.4")
+
 }

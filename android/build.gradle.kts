@@ -30,3 +30,9 @@ subprojects {
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
+
+allprojects {
+    repositories {
+        maven { url = uri("https://jitpack.io") }
+    }
+}
