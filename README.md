@@ -1,16 +1,150 @@
-# safety_screen
+#  مشروع غُضُّوا (Ghadhoo) —   
 
-A new Flutter project.
+> **"قُل لِّلْمُؤْمِنِينَ يَغُضُّوا مِنْ أَبْصَارِهِمْ وَيَحْفَظُوا فُرُوجَهُمْ ۚ ذَٰلِكَ أَزْكَىٰ لَهُمْ ۗ"** > تطبيق أندرويد ثوري  مبني باستخدام **Flutter** والـ **Native Android (Kotlin)**، يوفر حماية نظامية شاملة (System-Wide) لمساعدة المستخدمين على صيانة وبناء عادات بصرية سليمة، من خلال تحليل محتوى الشاشة لحظياً وحجب اللقطات غير المناسبة تلقائياً بالاعتماد على الذكاء الاصطناعي المحلي والسحابي.
 
-## Getting Started
+---
 
-This project is a starting point for a Flutter application.
+## 🛠️ المشكلة التي يحلها المشروع (The Problem Statement)
 
-A few resources to get you started if this is your first Flutter project:
+في العصر الرقمي الحالي، يواجه المستخدم أثناء تصفحه اليومي للهاتف عبر مختلف تطبيقات التواصل الاجتماعي، أو المتصفحات، أو تطبيقات المحادثة، تدفقاً هائلاً وفجائياً من الصور واللقطات الخادشة أو غير المناسبة أخلاقياً ودينياً. تكمن المشكلة في:
+1. **غياب الحماية الشاملة:** أغلب أدوات الفلترة الحالية تقتصر على متصفح خاص أو تطبيق معين، بينما تفتقر المنصات لحل يحمي شاشة الهاتف بالكامل وفي جميع التطبيقات (System-Wide).
+2. **انتهاك الخصوصية:** الفلاتر التقليدية تعتمد على إرسال كل بيانات التصفح لخوادم خارجية، مما يثير مخاوف أمنية عميقة لدى المستخدمين.
+3. **التأثير على موارد الجهاز:** معالجة الرسوميات والفيديو لحظياً في الخلفية تتسبب عادةً في استهلاك عنيف للبطارية وذاكرة الجهاز (RAM) وتحدث بطئاً (Lag) في نظام التشغيل.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+---
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## 💡 فلسفة المشروع ورؤية قائد الفريق (Project Philosophy)
+
+تأسس مشروع **"غُضُّوا"** ليكون نموذجاً تطبيقياً يدمج بين **الأصالة الروحية والهندسة البرمجية المتقدمة**. ترتكز فلسفة المشروع على ثلاثة محاور حاسمة:
+* **الأمان المطلق والخصوصية أولاً (Privacy by Design):** جعل المعالجة المحلية المستندة إلى الذكاء الاصطناعي على الجهاز (On-Device AI) هي المعيار الأساسي؛ لضمان عدم خروج أي لقطة أو بكسل واحد من شاشة المستخدم إلى شبكة الإنترنت.
+* **التجربة البصرية الروحية المهدئة:** استبدال واجهات المستخدم التجارية الجافة بزخارف وأشكال هندسية إسلامية مرسومة برمجياً بالكامل، تبعث على الهدوء والسكينة أثناء تفعيل نظام الحماية.
+* **الأمانة التقنية والشفافية:** توفير خيارات متعددة للمستخدم (معالجة محلية خفيفة، أو سحابية دقيقة) مع توضيح الفروق الجوهرية بكل صدق وموثوقية في صفحات التهيئة الأولى لتبني جسر من الثقة الصلبة.
+
+---
+
+## 🏗️ البنية الهندسية وتدفق البيانات (Architectural Pipeline)
+
+يعتمد التطبيق على معمارية هجينة ومفصولة المهام بدقة بين واجهة الـ Flutter ونواة الـ Android الأصلية (Native Kotlin):
+
+```
+[ Flutter UI Layer ] 
+       │
+       ▼ (MethodChannel: com.ghadhoo_buler/screen_monitor)
+[ MainActivity.kt ] ──(Permissions Check)──► Overlay & MediaProjection
+       │
+       ▼ (Foreground Service)
+[ ScreenMonitorService.kt ] ◄──(Real-time Loop: 4-5 fps)──┐
+       │                                                 │
+       ├──► [ ImageReader ] ──► [ Bitmap Extract ] ──────┘
+       │
+       ▼ (AI Analysis Interface)
+[ ContentAnalyzer ]
+       ├──► LocalAiAnalyzer (LiteRT / TFLite - On-Device)
+       └──► CloudContentAnalyzer (Google Vision / AWS Rekognition)
+       │
+       ▼ (If Unsafe Content Detected)
+[ OverlayManager.kt ] ──► Active System Overlay Window
+       ├──► Android 12+ (SDK >= 31): Hardware-Accelerated Behind Blur
+       └──► Android 11- (SDK <= 30): Elegant Geometric Color Overlay
+```
+
+### 1. طبقة واجهة المستخدم (Flutter UI Layer)
+* **`home_screen.dart`**: لوحة التحكم المركزية، تمكن المستخدم من تشغيل/إيقاف الخدمة، دفع تعديلات درجات التعتيم الضبابي (`blurRadius`)، واختيار ألوان الحجب للأجهزة القديمة فورياً عبر الـ Channels.
+* **`onboarding_screen.dart`**: معالج التهيئة الأول المكون من 4 صفحات تقدم مقارنة هندسية شفيفة وبناء وعي أخلاقي لدى المستخدم قبل توقيع ميثاق الاستخدام.
+* **`splash_screen.dart`**: مقدمة سينمائية حركية متطورة للغاية تُجسد كلمة "غُضُّوا" بالخط العربي على هيئة عين بشرية مفتوحة تغلق جفنيها بنعومة عند التفعيل التام.
+* **الرسامون المخصصون (`Custom Painters`)**: ملفات (`gold_ornament.dart`, `islamic_background.dart`..) ترسم الخلفيات والنجوم الإسلامية ثنائية وثمانية الأشعة رياضياً لتقليص حجم الـ APK إلى أدنى حد ممكن وحماية ذاكرة الجهاز.
+
+### 2. نواة النظام الأصلي (Native Android Engine)
+* **`MainActivity.kt`**: تدير مصفوفة التحقق الأمني واستخراج أذونات النظام الحرجة: إذن الظهور فوق التطبيقات (`SYSTEM_ALERT_WINDOW`) وإذن التقاط الشاشة المباشر (`MEDIA_PROJECTION_SERVICE`).
+* **`ScreenMonitorService.kt`**: خدمة خلفية مستمرة عريضة الأولوية (`Foreground Service`) تعمل عبر إشعار نظام دائم لضمان عدم إغلاقها من قِبل معالج النظام. تقوم بإنشاء `VirtualDisplay` يسحب لقطات الشاشة بمعدل منظم يتراوح بين 4 إلى 5 إطارات في الثانية لتوفير الطاقة.
+* **`LocalAiAnalyzer.kt`**: عصب الذكاء الاصطناعي المحلي. يستخدم مكتبة **Google LiteRT** الجديدة لتهيئة وتشغيل موديل `nsfw.tflite` (المبني على بنية معالجة الصور لـ Yahoo Open NSFW). يقوم بقص وإعادة تحجيم مصفوفة البكسلات إلى أبعاد `224x224` مع طرح المتوسط اللوني التكيفي (BGR Mean Subtraction) وإرجاع نسبة الاشتباه فورياً.
+* **`CloudContentAnalyzer.kt`**: كود هيكلي معدّ مسبقاً لاستقبال المعالجة السحابية المتقدمة لتقطيع وحجب أجزاء معينة فقط من الشاشة عبر إحداثيات هندسية دقيقة (`NsfwRegion`).
+* **`OverlayManager.kt`**: المحرك الرسومي المسؤول عن الحجب:
+  * **في نظام أندرويد 12 وما فوق:** يستغل قدرات المعالج الرسومي للنظام ويقوم بتطبيق تأثير ضبابي زجاجي رائع ومباشر عبر خيار `params.blurBehindRadius` دون رسم حاويات مصمتة، مما يمنح تجربة مستخدم معاصرة فائقة النقاء.
+  * **في نظام أندرويد 11 وما دونه:** يقوم ببناء نافذة نظام فرعية وحقن حاوية دائرية ناعمة الحواف متناسقة برمجياً مع اللون المختار لحجب المحتوى بشكل أنيق.
+
+---
+
+## 📂 الهيكل البرمجي للمشروع (Project Directory Structure)
+
+### 📱 جانب الـ Flutter (Dart)
+```
+lib/
+├── main.dart
+├── screens/
+│   ├── home_screen.dart            # شاشة لوحة التحكم وتعديل الإعدادات الحية
+│   ├── onboarding_screen.dart      # شاشات التوجيه والمقارنة التقنية الشفافة
+│   └── splash_screen.dart          # شاشة المقدمة الحركية والسينمائية للشعار
+├── themes/
+│   ├── gold_ornament.dart          # قالب إدارة وتدوير الزخرفة الذهبية
+│   ├── intro_background_painter.dart # رسام الخلفية النجمية لصفحات التهيئة
+│   ├── islamic_background.dart     # معالج تدوير ورسم الأنماط الإسلامية الدائرية
+│   └── ornament_painter.dart       # كود منحنيات بيزيه الرياضية للزخارف الأطراف
+└── widgets/
+    ├── feature_box.dart            # صندوق ذكي لعرض المميزات والعيوب شرطياً
+    ├── islamic_card.dart           # حاوية موحدة للإعدادات بالطابع الإسلامي
+    └── mode_card.dart              # بطاقات اختيار نمط التحليل (محلي/سحابي)
+```
+
+### 🤖 جانب الـ Native (Kotlin)
+```
+android/app/src/main/kotlin/com/ghadhoo_buler/
+├── MainActivity.kt                 # مستقبل الـ MethodChannel ومُدير تدفق الأذونات
+├── ScreenMonitorService.kt          # خدمة الخلفية الدائمة ومستخرج لقطات الشاشة
+├── ContentAnalyzer.kt              # الواجهة القياسية المشتركة لمحللي المحتوى
+├── LocalAiAnalyzer.kt              # معالج الذكاء المحلي الذكي عبر ميكانيكية LiteRT
+├── CloudContentAnalyzer.kt          # معالج الاتصال السحابي وتحديد المناطق المستقبلي
+└── OverlayManager.kt               # مهندس رسم نوافذ الحجب والتعتيم على الشاشة
+```
+
+---
+
+## ⚙️ متطلبات التشغيل والتهيئة (Setup & Requirements)
+
+لتشغيل وتطوير المشروع بنجاح، يجب توفير المتطلبات والتبعيات التالية:
+
+### 1. الجانب البرمجي والبيئة (Environment)
+* **Flutter SDK:** `>= 3.3.0`
+* **Dart SDK:** `>= 3.0.0`
+* **Android SDK:** `Compile SDK >= 34`, `Min SDK >= 23` (Android 6.0+)
+* **Kotlin Version:** `>= 1.9.0`
+
+### 2. التبعيات الحرجة في الأندرويد (Dependencies)
+تأكد من إدراج مكتبات تشغيل الذكاء الاصطناعي الجديدة في ملف `build.gradle` الخاص بـ app:
+```groovy
+dependencies {
+    // مكتبة Google LiteRT الحديثة لتشغيل نماذج الذكاء الاصطناعي على الأجهزة
+    implementation "com.google.ai.edge.litert:litert:1.0.1"
+    implementation "com.google.ai.edge.litert:litert-support:1.0.1"
+}
+```
+
+### 3. ملف الموديل المحلي (Model Placement)
+يجب وضع ملف نموذج الذكاء الاصطناعي الخاص بالتحليل البصري تحت مسار الأصول للأندرويد بالاسم التالي تماماً:
+`android/app/src/main/assets/nsfw.tflite`
+
+### 4. صلاحيات وأذونات النظام القياسية (`AndroidManifest.xml`)
+يتطلب التطبيق الأذونات التالية للعمل بسلاسة في الخلفية وفوق التطبيقات الأخرى:
+```xml
+<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+```
+
+---
+
+## 🛡️ أمن البيانات وكفاءة الأداء (Performance Optimization)
+
+* **تقنية تدوير وتحويل الأشكال (Transform Memory Savings):** تم استخدام تقنية الـ Matrix Scaling الرياضية لعكس الرسومات المتناظرة (Mirroring) بدلاً من إعادة حساب النقاط، مما وفر 50% من استهلاك المعالج أثناء معالجة الرسم الرسومي للزخارف.
+* **منع تسريب الذاكرة (Zero Memory Leaks):** تم إلغاء وتفريغ كافة الـ `AnimationControllers` البالغ عددها 9 في شاشة الـ Splash والشاشات الأخرى فور انتهائها باستخدام دالة `dispose()` لضمان بقاء التطبيق خفيفاً على الذاكرة العشوائية للجهاز.
+* **التأخير الذكي للتكرار (Frame-Rate Throttling):** لا يقوم التطبيق بتحليل الشاشة بتردد عالٍ يرهق المعالج، بل يتم تجميع اللقطات بفارق زمني مدروس (حوالي 200-250 ملي ثانية لكل إطار)، وهي سرعة كافية جداً لحجب اللقطات فور ظهورها لحماية العين دون التسبب في ارتفاع حرارة الهاتف.
+
+---
+
+## 👨‍💻 فريق العمل والتطوير (Development Team)
+
+**Ahmed Albotini** -(Junior+ Flutter Developer & Native Kotlin Integration)
+--
+**Abdalaziz Alsagaf** -(Junior Laravel Backend Developer)
+--

@@ -1,21 +1,32 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:safety_screen/home.dart';
-import 'package:safety_screen/splash_screen.dart';
+import 'package:safety_screen/screens/onboarding_screen.dart';
 
-void main() {
+
+import 'package:safety_screen/screens/home_screen.dart';
+import 'package:safety_screen/screens/splash_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+
+void main() async {
+
   WidgetsFlutterBinding.ensureInitialized();
-  // شريط الحالة شفاف متناسق مع الثيم الداكن
+  
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor:            Colors.transparent,
     statusBarIconBrightness:   Brightness.light,
-
   ));
-  runApp(const SafeScreenApp());
+
+
+  final prefs =await SharedPreferences.getInstance();
+  final bool isFirstTime = prefs.getBool('isFirstTime') ?? true;
+
+  runApp(SafeScreenApp(isFirstTime: isFirstTime));
 }
 
 class SafeScreenApp extends StatelessWidget {
-  const SafeScreenApp({super.key});
+  final bool isFirstTime;
+  const SafeScreenApp({super.key, required this.isFirstTime});
 
   @override
   Widget build(BuildContext context) {
@@ -24,8 +35,8 @@ class SafeScreenApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.dark(
-          primary:   const Color(0xFFD4AF37), // ذهبي
-          secondary: const Color(0xFF1A3C2A), // أخضر الجنة
+          primary:   const Color(0xFFD4AF37), 
+          secondary: const Color(0xFF1A3C2A), 
           surface:   const Color(0xFF141810),
         ),
         scaffoldBackgroundColor: const Color(0xFF0C0E0B),
@@ -37,30 +48,40 @@ class SafeScreenApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const _SplashWrapper(),
+      home: _SplashWrapper(isFirstTime: isFirstTime),
     );
   }
 }
 
 class _SplashWrapper extends StatefulWidget {
-  const _SplashWrapper();
+  final bool isFirstTime;
+  const _SplashWrapper({required this.isFirstTime});
 
   @override
   State<_SplashWrapper> createState() => _SplashWrapperState();
 }
 
 class _SplashWrapperState extends State<_SplashWrapper> {
-  bool _showHome = false;
+  Widget? _nextScreen;
 
   void _onSplashComplete() {
-    setState(() => _showHome = true);
+    setState(() {
+
+      if (widget.isFirstTime) {
+        _nextScreen = const OnboardingScreen();
+      } else {
+        _nextScreen = const HomeScreen();
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_showHome) {
-      return const SafeScreenHome();
+
+    if (_nextScreen != null) {
+      return _nextScreen!;
     }
-    return GhuddooSplash(onComplete: _onSplashComplete);
+
+    return SplashScreen(onComplete: _onSplashComplete);
   }
 }

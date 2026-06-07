@@ -1,20 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.ghadhoo_buler">
-
-    <!-- 1. تصاريح الظهور فوق التطبيقات (Overlay) -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!-- 2. تصاريح الخدمة في الخلفية (Foreground Service) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     
-    <!-- 3. تصريح خاص بتصوير الشاشة - إلزامي لأندرويد 14 فما فوق -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-
-    <!-- 4. تصريح الإشعارات (لإظهار أيقونة الخدمة النشطة) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:label="Ghdooh Buler"
+        android:label="Ghuddoo"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon"
         android:enableOnBackInvokedCallback="true">

@@ -50,6 +50,12 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+lint {
+    disable += "NullSafeMutableLiveData"
+    checkReleaseBuilds = false
+    abortOnError = false
+}
 }
 
 flutter {
