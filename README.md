@@ -144,7 +144,8 @@ dependencies {
 
 ## 👨‍💻 فريق العمل والتطوير (Development Team)
 
-**Ahmed Albotini** -(Junior+ Flutter Developer & Native Kotlin Integration)
---
+**Ahmed Albotini** -(Junior+ Flutter Developer & Native Kotlin Integration )
+- ahmedalbotini@gmail.com
+
 **Abdalaziz Alsagaf** -(Junior Laravel Backend Developer)
---
+- email

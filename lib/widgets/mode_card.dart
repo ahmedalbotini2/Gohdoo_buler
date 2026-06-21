@@ -8,7 +8,6 @@ class ModeCard extends StatelessWidget {
   final IconData  icon;
   final String    title;
   final String    subtitle;
-  final String    label;
   final VoidCallback? onTap;
 
   const ModeCard({
@@ -17,7 +16,6 @@ class ModeCard extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.subtitle,
-    required this.label,
     required this.onTap,
   });
 

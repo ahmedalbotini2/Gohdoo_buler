@@ -51,6 +51,13 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
+                // ✅ جديد: استقبال وضع المحلل (محلي/احترافي) من واجهة Flutter
+                "setAnalyzerMode" -> {
+                    val useLocal = call.argument<Boolean>("useLocalAi") ?: true
+                    ScreenMonitorService.setAnalyzerMode(useLocal)
+                    result.success(null)
+                }
+
                 // Flutter يستعلم عن إصدار Android لعرض الـ UI المناسب
                 "getAndroidVersion" -> result.success(Build.VERSION.SDK_INT)
 
@@ -62,7 +69,7 @@ class MainActivity : FlutterActivity() {
     private fun startMonitoringFlow(result: MethodChannel.Result) {
         this.pendingResult = result
 
-        // ✅ المشكلة ٣: طلب إذن الإشعارات أولاً في Android 13+
+        // طلب إذن الإشعارات أولاً في Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -89,7 +96,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ✅ نتيجة طلب إذن الإشعارات
+    // نتيجة طلب إذن الإشعارات
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray
     ) {

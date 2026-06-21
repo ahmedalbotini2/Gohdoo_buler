@@ -31,7 +31,7 @@ class SafeScreenApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title:        'غُضُّوا',
+      title:'غُضُّوا',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.dark(

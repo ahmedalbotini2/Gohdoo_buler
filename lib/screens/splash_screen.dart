@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:safety_screen/widgets/splash_painter.dart';
+import 'package:safety_screen/themes/splash_painter.dart';
 
 class SplashScreen extends StatefulWidget {
   final VoidCallback onComplete;

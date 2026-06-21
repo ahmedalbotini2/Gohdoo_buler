@@ -1,7 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// قراءة ملف local.properties بصيغة Kotlin المتوافقة مع الملف
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
 }
 
 android {
@@ -21,12 +30,21 @@ android {
         }
     }
 
+    // تفعيل توليد كلاس BuildConfig
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.ghadhoo_buler"
         minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // جلب المفتاح من اللوكل بروبرتيز وحقنه في الكود
+        val openRouterKey = localProperties.getProperty("openrouter.api.key") ?: ""
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"$openRouterKey\"")
     }
 
     packaging {
@@ -51,23 +69,23 @@ android {
         }
     }
 
-lint {
-    disable += "NullSafeMutableLiveData"
-    checkReleaseBuilds = false
-    abortOnError = false
-}
+    lint {
+        disable += "NullSafeMutableLiveData"
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 flutter {
     source = "../.."
 }
 
-// ✅ JitPack هنا على مستوى الـ project وليس settings — يتوافق مع Flutter
 repositories {
 }
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("com.google.ai.edge.litert:litert:2.1.4")
-
+    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
