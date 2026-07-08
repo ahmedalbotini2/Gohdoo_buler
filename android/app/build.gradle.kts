@@ -45,6 +45,14 @@ android {
         // جلب المفتاح من اللوكل بروبرتيز وحقنه في الكود
         val openRouterKey = localProperties.getProperty("openrouter.api.key") ?: ""
         buildConfigField("String", "OPENROUTER_API_KEY", "\"$openRouterKey\"")
+
+        // ✅ جديد: بيانات الباك اند (Laravel على Render) — نفس أسلوب
+        // openrouter.api.key بالظبط، تُقرأ من local.properties ولا تُكتب هنا
+        // مباشرة حتى لا تتسرب لو الريبو عام على GitHub.
+        val backendBaseUrl = localProperties.getProperty("backend.base.url") ?: ""
+        val backendAppKey  = localProperties.getProperty("backend.app.key") ?: ""
+        buildConfigField("String", "BACKEND_BASE_URL", "\"$backendBaseUrl\"")
+        buildConfigField("String", "BACKEND_APP_KEY", "\"$backendAppKey\"")
     }
 
     packaging {

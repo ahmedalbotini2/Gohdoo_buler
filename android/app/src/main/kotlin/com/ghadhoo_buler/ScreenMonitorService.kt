@@ -37,6 +37,15 @@ class ScreenMonitorService : Service() {
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_RESULT_DATA = "EXTRA_RESULT_DATA"
         var openRouterApiKey = BuildConfig.OPENROUTER_API_KEY// ✅ مفتاح OpenRouter — استبدله بمفتاحك الخاص
+
+        // ✅ جديد: بيانات الباك اند (Laravel على Render) — تُستخدم كخط دفاع
+        // ثانٍ عندما يستنفد DirectOpenRouterAnalyzer كل الموديلات المجانية
+        // ويرمي RateLimitExceededException (429 على كل المحاولات).
+        // أضِف القيمتين في build.gradle عبر buildConfigField (نفس أسلوب
+        // OPENROUTER_API_KEY أعلاه) بدل كتابتهما هنا مباشرة.
+        var backendBaseUrl = BuildConfig.BACKEND_BASE_URL
+        var backendAppKey  = BuildConfig.BACKEND_APP_KEY
+
         var isMonitoring = false
             private set
 
@@ -59,8 +68,14 @@ class ScreenMonitorService : Service() {
     private var mediaProjection: MediaProjection?   = null
     private var overlayManager: OverlayManager?     = null
 
-    // ✅ يمنع تكرار رسالة/عملية التراجع للمحلي إذا تكرر 429 أكثر من مرة بالجلسة
+    // ✅ يمنع تكرار رسالة/عملية التراجع للسيرفر الاحتياطي إذا تكرر 429 أكثر
+    // من مرة بالجلسة الواحدة
     private var rateLimitFallbackTriggered = false
+
+    // ✅ يمنع تكرار التراجع الثاني (من الباك اند إلى المحلي) أكثر من مرة —
+    // يُستخدم فقط لو الباك اند نفسه غير متاح (مثلاً السيرفر نايم على
+    // Render Free Tier ولسه ما "صحيش")
+    private var backendFallbackTriggered = false
 
     // استخدام الواجهة المشتركة — يتم اختيار التطبيق الفعلي (محلي/سحابي) في startMonitoring()
     private var aiAnalyzer: ContentAnalyzer?        = null
@@ -111,43 +126,42 @@ class ScreenMonitorService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startMonitoring(resultCode: Int, resultData: Intent) {
-        if (isMonitoring) return
-        createNotificationChannel()
-        rateLimitFallbackTriggered = false // ✅ جلسة جديدة، نسمح بالتراجع التلقائي من جديد إن لزم
+   private fun startMonitoring(resultCode: Int, resultData: Intent) {
+    if (isMonitoring) return
+    createNotificationChannel()
+    // ✅ جلسة جديدة، نسمح بكل مراحل التراجع (Fallback) من جديد إن لزم
+    rateLimitFallbackTriggered = false
+    backendFallbackTriggered   = false
 
-        val notifText = if (useLocalAi)
-            "يتم تحليل الشاشة محلياً على جهازك."
-        else
-            "يتم تحليل الشاشة سحابياً للتجربة."
+    val notifText = if (useLocalAi)
+        "يتم تحليل الشاشة محلياً على جهازك."
+    else
+        "يتم تحليل الشاشة سحابياً للتجربة."
 
-        val notif = NotificationCompat.Builder(this, "safescreen_channel")
-            .setContentTitle("غُضُّوا — الحماية نشطة")
-            .setContentText(notifText)
-            .setSmallIcon(android.R.drawable.ic_secure)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setOngoing(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+    val notif = NotificationCompat.Builder(this, "safescreen_channel")
+        .setContentTitle("غُضُّوا — الحماية نشطة")
+        .setContentText(notifText)
+        .setSmallIcon(android.R.drawable.ic_secure)
+        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setOngoing(true)
+        .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+        .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-            startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        else
-            startForeground(1, notif)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+        startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+    else
+        startForeground(1, notif)
 
-        overlayManager    = OverlayManager(this)
-        overlayManagerRef = overlayManager
+    overlayManager    = OverlayManager(this)
+    overlayManagerRef = overlayManager
 
         // ✅ تهيئة المحلل المناسب حسب الوضع المختار من الواجهة
         aiAnalyzer = if (useLocalAi) {
             LocalAiAnalyzer(this)
         } else {
                DirectOpenRouterAnalyzer(
-            openRouterApiKey,
-         listOf("nvidia/nemotron-nano-12b-v2-vl:free",
-           "google/gemma-4-31b-it:free",
-           "google/gemma-4-26b-a4b-it:free"))
-           //DirectOpenRouterAnalyzer("key")
+            openRouterApiKey,)
+        
         }
 
         val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -160,7 +174,24 @@ class ScreenMonitorService : Service() {
         handler.post(captureRunnable)
         Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — محلل محلي (LocalAiAnalyzer)"
                           else "✅ الخدمة تعمل — يتم استخدام OpenRouter")
+    // ✅ تهيئة المحلل المناسب حسب الوضع المختار من الواجهة
+    aiAnalyzer = if (useLocalAi) {
+        LocalAiAnalyzer(this)
+    } else {
+        DirectOpenRouterAnalyzer(openRouterApiKey)
     }
+
+    val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    mediaProjection = projMgr.getMediaProjection(resultCode, resultData)
+
+    if (isA12) setupVirtualDisplay12() else setupVirtualDisplay11()
+
+    isMonitoring = true
+    isCapturing  = true
+    handler.post(captureRunnable)
+    Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — محلل محلي (LocalAiAnalyzer)"
+                      else "✅ الخدمة تعمل — يتم استخدام OpenRouter (قائمة موديلات مجانية ديناميكية)")
+}
 
     // ✅ أبعاد الالتقاط الفعلية المستخدمة هذه الجلسة — تُحسب بحيث تحافظ على
     // نفس نسبة عرض/ارتفاع الشاشة الحقيقية (وإلا تنحرف مواقع المناطق المكتشفة
@@ -246,7 +277,7 @@ class ScreenMonitorService : Service() {
 
     private fun captureFrame() {
         // ✅ لا نبدأ التقاطاً/تحليلاً جديداً قبل اكتمال السابق — يمنع تراكم
-        // طلبات OpenRouter المتزامنة ويحافظ على الحصة المجانية
+        // طلبات OpenRouter/الباك اند المتزامنة ويحافظ على الحصة المجانية
         if (isAnalyzing) {
             Log.d("Ghadhoo", "⏭️ تخطي هذا الإطار — التحليل السابق لم يكتمل بعد")
             return
@@ -276,8 +307,8 @@ class ScreenMonitorService : Service() {
 
                     if (isUnsafe) {
                         safeCount = 0
-                        // ✅ نمرر المناطق المكتشفة إن وجدت (الوضع السحابي) — وإن
-                        // كانت null (الوضع المحلي) سيُغطّى الشاشة بالكامل كالسابق
+                        // ✅ نمرر المناطق المكتشفة إن وجدت (الوضع السحابي/الباك اند) —
+                        // وإن كانت null (الوضع المحلي) سيُغطّى الشاشة بالكامل كالسابق
                         overlayManager?.showOverlay(result?.regions)
                         Log.d("Ghadhoo", "🚨 تم التعتيم! (مناطق=${result?.regions?.size ?: "شاشة كاملة"})")
                     } else {
@@ -287,11 +318,12 @@ class ScreenMonitorService : Service() {
                         }
                     }
                 } catch (e: RateLimitExceededException) {
-                    // ✅ تجاوز الحصة المجانية اليومية لـ OpenRouter — نتراجع
-                    // تلقائياً إلى المحلل المحلي حتى لا تنقطع الحماية، ونُبلّغ
-                    // المستخدم عبر تحديث إشعار الخدمة القائمة (Foreground Notification)
-                    Log.w("Ghadhoo", "🛑 RateLimitExceeded: ${e.message} — التراجع للمحلل المحلي")
-                    handleRateLimitFallback()
+                    // ✅ تجاوز الحصة المجانية اليومية لكل موديلات OpenRouter
+                    // المجانية — نتراجع تلقائياً إلى الباك اند الخاص بنا
+                    // (BackendApiAi على Render) بدل المحلل المحلي، حتى تستمر
+                    // دقة الحجب بالمناطق (regions) بدل التعتيم الكامل للشاشة
+                    Log.w("Ghadhoo", "🛑 RateLimitExceeded: ${e.message} — التراجع إلى الباك اند")
+                    handleRateLimitFallbackToBackend()
                 } catch (e: Exception) {
                     Log.e("Ghadhoo", "❌ خطأ غير متوقع أثناء التحليل: ${e.message}")
                 } finally {
@@ -342,10 +374,18 @@ class ScreenMonitorService : Service() {
         stopSelf()
     }
 
-    // ✅ يُستدعى عند رصد RateLimitExceededException من المحلل السحابي
-    // (تجاوز الحصة المجانية اليومية في OpenRouter): يُبدّل المحلل النشط فوراً
-    // إلى LocalAiAnalyzer لباقي الجلسة، ويُحدّث إشعار الخدمة لإبلاغ المستخدم
-    private fun handleRateLimitFallback() {
+    // ✅ يُستدعى عند رصد RateLimitExceededException من DirectOpenRouterAnalyzer
+    // (تجاوز الحصة المجانية اليومية لكل الموديلات المُجرَّبة في OpenRouter):
+    // يُبدّل المحلل النشط فوراً إلى BackendApiAi (سيرفرنا على Render) لباقي
+    // الجلسة، ويُحدّث إشعار الخدمة لإبلاغ المستخدم.
+    //
+    // ملاحظة: BackendApiAi.analyze() لا يرمي أي استثناء أبداً (يلتقط كل
+    // الأخطاء داخلياً ويرجع AnalysisResult(false) كـ fail-safe) — لذلك هو
+    // "المحطة الأخيرة" الآمنة في سلسلة التراجع، ولا حاجة لالتقاط استثناء
+    // منه هنا تحديداً.
+    private fun handleRateLimitFallback() = handleRateLimitFallbackToBackend()
+
+    private fun handleRateLimitFallbackToBackend() {
         if (rateLimitFallbackTriggered) return // لا نكرر التبديل/الإشعار
         rateLimitFallbackTriggered = true
 
@@ -353,11 +393,40 @@ class ScreenMonitorService : Service() {
             aiAnalyzer?.close()
         } catch (_: Exception) { /* تجاهل أي خطأ إغلاق غير مهم هنا */ }
 
-        aiAnalyzer = LocalAiAnalyzer(this)
-        Log.w("Ghadhoo", "🔄 تم التبديل تلقائياً إلى المحلل المحلي بسبب تجاوز الحصة السحابية")
+        aiAnalyzer = BackendApiAi(baseUrl = backendBaseUrl, appApiKey = backendAppKey)
+        Log.w("Ghadhoo", "🔄 تم التبديل تلقائياً إلى الباك اند (BackendApiAi) بسبب تجاوز الحصة السحابية على OpenRouter")
 
         updateNotification(
-            "تم تجاوز الحد المجاني اليومي — تم التحويل للمحلل المحلي تلقائياً"
+            "تم تجاوز الحد المجاني اليومي — تم التحويل لسيرفرنا الاحتياطي تلقائياً"
+        )
+
+        // ✅ فحص اختياري: تأكد إن الباك اند فعلاً متاح، وإلا تراجع أخيراً
+        // للمحلل المحلي حتى لا تنقطع الحماية بالكامل (مثلاً لو Render واقف
+        // أو لسه "نايم" على الخطة المجانية ولم يستجب في الوقت المناسب)
+        serviceScope.launch {
+            val backend = aiAnalyzer as? BackendApiAi ?: return@launch
+            val healthy = try { backend.checkHealth() } catch (_: Exception) { false }
+            if (!healthy) {
+                handleBackendUnavailableFallback()
+            }
+        }
+    }
+
+    // ✅ يُستدعى فقط لو الباك اند نفسه غير متاح بعد التحويل إليه — تراجع
+    // أخير للمحلل المحلي كضمانة أخيرة لاستمرار الحماية
+    private fun handleBackendUnavailableFallback() {
+        if (backendFallbackTriggered) return
+        backendFallbackTriggered = true
+
+        try {
+            aiAnalyzer?.close()
+        } catch (_: Exception) { /* تجاهل */ }
+
+        aiAnalyzer = LocalAiAnalyzer(this)
+        Log.w("Ghadhoo", "🔄 الباك اند غير متاح أيضاً — تم التبديل النهائي إلى المحلل المحلي")
+
+        updateNotification(
+            "تعذّر الوصول للسيرفر الاحتياطي — تم التحويل للتحليل المحلي"
         )
     }
 
