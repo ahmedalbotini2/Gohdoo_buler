@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:safety_screen/widgets/feature_box.dart';
 import 'package:safety_screen/themes/intro_background_painter.dart';
 import 'package:safety_screen/widgets/terms_bullet.dart';
-import 'package:safety_screen/screens/home_screen.dart'; // تأكد من مسار الاستيراد الصحيح
+import 'package:safety_screen/screens/home_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // تأكد من مسار الاستيراد الصحيح
 // ستحتاج إلى إضافة حزمة shared_preferences في pubspec.yaml لاحقاً لحفظ حالة العرض الأول
 
 class OnboardingScreen extends StatefulWidget {
@@ -58,8 +59,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> with SingleTickerPr
     
     // ملاحظة: هنا يمكنك استخدام SharedPreferences لحفظ أن المستخدم أكمل الشاشات
     // مثال:
-    // final prefs = await SharedPreferences.getInstance();
-    // await prefs.setBool('isFirstTime', false);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isFirstTime', false);
 
     if (mounted) {
       Navigator.of(context).pushReplacement(
@@ -161,77 +162,92 @@ class _OnboardingScreenState extends State<OnboardingScreen> with SingleTickerPr
 
   // ── 4. صفحة الشروط والموافقة ────────────────────────────────────────────────
   Widget _buildTermsPage() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _gold.withValues(alpha: 0.1),
-              border: Border.all(color: _gold.withValues(alpha: 0.3), width: 1.5),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
+          child: ConstrainedBox(
+            // ✅ يضمن إن المحتوى ياخد على الأقل ارتفاع الشاشة المتاحة (عشان
+            // الـ Spacer يشتغل ويدفع مربع الموافقة لأسفل زي المطلوب)، لكن
+            // من غير ما يمنع التمرير لو المحتوى زاد فعليًا عن المساحة —
+            // وده اللي كان بيسبب RenderFlex overflow قبل كده.
+            constraints: BoxConstraints(
+              minHeight: constraints.maxHeight - 32, // 32 = padding العمودي أعلاه/أسفل
             ),
-            child: const Icon(Icons.verified_user_outlined, size: 60, color: _goldLight),
-          ),
-          const SizedBox(height: 32),
-          const Text(
-            'شروط الاستخدام والخصوصية',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: _goldLight, fontFamily: 'serif'),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 16),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: _surface,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: _gold.withValues(alpha: 0.2)),
-            ),
-            child:  Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TermsBullet(text: 'خصوصيتك هي أولويتنا القصوى.'),
-                TermsBullet(text: 'التطبيق لا يقوم بحفظ، تخزين، أو مشاركة أي محتوى يظهر على شاشتك.'),
-                TermsBullet(text: 'لا يتم استغلال بياناتك الشخصية أو بيعها لأي جهة خارجية تحت أي ظرف.'),
-                TermsBullet(text: 'نظام الفلترة المحلي يعمل بالكامل داخل هاتفك.'),
-              ],
-            ),
-          ),
-          const Spacer(),
-          GestureDetector(
-            onTap: () {
-              setState(() => _acceptedTerms = !_acceptedTerms);
-            },
-            child: Row(
-              children: [
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: 24, height: 24,
-                  decoration: BoxDecoration(
-                    color: _acceptedTerms ? _gold : Colors.transparent,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(
-                      color: _acceptedTerms ? _gold : _textSub,
-                      width: 1.5,
+            child: IntrinsicHeight(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _gold.withValues(alpha: 0.1),
+                      border: Border.all(color: _gold.withValues(alpha: 0.3), width: 1.5),
+                    ),
+                    child: const Icon(Icons.verified_user_outlined, size: 60, color: _goldLight),
+                  ),
+                  const SizedBox(height: 32),
+                  const Text(
+                    'شروط الاستخدام والخصوصية',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: _goldLight, fontFamily: 'serif'),
+                    textAlign: TextAlign.center,
+                  ),
+                 const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: _surface,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: _gold.withValues(alpha: 0.2)),
+                    ),
+                    child:  Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TermsBullet(text: 'خصوصيتك هي أولويتنا القصوى.'),
+                        TermsBullet(text: 'التطبيق لا يقوم بحفظ، تخزين، أو مشاركة أي محتوى يظهر على شاشتك.'),
+                        TermsBullet(text: 'لا يتم استغلال بياناتك الشخصية أو بيعها لأي جهة خارجية تحت أي ظرف.'),
+                        TermsBullet(text: 'نظام الفلترة المحلي يعمل بالكامل داخل هاتفك.'),
+                      ],
                     ),
                   ),
-                  child: _acceptedTerms ? const Icon(Icons.check, size: 16, color: _bg) : null,
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'قرأت الشروط وأوافق على سياسة الخصوصية وعدم استغلال البيانات.',
-                    style: TextStyle(color: _textMain, fontSize: 13, height: 1.5),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () {
+                      setState(() => _acceptedTerms = !_acceptedTerms);
+                    },
+                    child: Row(
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          width: 24, height: 24,
+                          decoration: BoxDecoration(
+                            color: _acceptedTerms ? _gold : Colors.transparent,
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(
+                              color: _acceptedTerms ? _gold : _textSub,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: _acceptedTerms ? const Icon(Icons.check, size: 16, color: _bg) : null,
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text(
+                            'قرأت الشروط وأوافق على سياسة الخصوصية وعدم استغلال البيانات.',
+                            style: TextStyle(color: _textMain, fontSize: 13, height: 1.5),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 20),
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 20),
-        ],
-      ),
+        );
+      },
     );
   }
 

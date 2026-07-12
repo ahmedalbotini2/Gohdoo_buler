@@ -80,11 +80,21 @@ class ScreenMonitorService : Service() {
     // استخدام الواجهة المشتركة — يتم اختيار التطبيق الفعلي (محلي/سحابي) في startMonitoring()
     private var aiAnalyzer: ContentAnalyzer?        = null
 
+    // ✅ جديد: في الوضع الهجين (احترافي/سحابي) فقط — بوابة محلية سريعة
+    // (نفس LocalAiAnalyzer بدون أي تعديل عليه) تُفحص كل إطار أولاً. السحابة
+    // (aiAnalyzer أعلاه) لا تُستدعى إلا لو هذه البوابة اشتبهت في المحتوى،
+    // مما يجعل الوضع السحابي سريعاً في الحالة الشائعة (آمن) ويقتصر التأخير
+    // على اللحظات النادرة اللي فعلاً محتاجة تحديد دقيق لموقع الحجب.
+    // تبقى null في الوضع المحلي البحت (useLocalAi = true) — غير مستخدمة هناك.
+    private var localGateAnalyzer: LocalAiAnalyzer? = null
+
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val handler      = Handler(Looper.getMainLooper())
-    // وقت الالتقاط: نرفعه تلقائيًا عند استخدام الوضع السحابي لأنه يحتاج وقتاً للرد عبر الإنترنت
-    private val captureMs: Long
-        get() = if (useLocalAi) 1000L else 3000L
+    // ✅ جديد: وقت التقاط ثابت وسريع للحالتين. في الوضع الهجين (احترافي)،
+    // كل إطار يمر أولاً على بوابة محلية سريعة (LocalAiAnalyzer) — السحابة
+    // البطيئة تُستدعى فقط لو البوابة المحلية اشتبهت، مش كل إطار. لذلك مفيش
+    // داعي لإبطاء الالتقاط بشكل عام زي قبل.
+    private val captureMs: Long = 1000L
     private var isCapturing  = false
     // ✅ يمنع بدء تحليل جديد قبل اكتمال التحليل الحالي (مهم خصوصاً مع تدوير
     // الموديلات السحابية، حيث قد تستغرق دورة كاملة وقتاً أطول من captureMs)
@@ -175,10 +185,14 @@ class ScreenMonitorService : Service() {
         Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — محلل محلي (LocalAiAnalyzer)"
                           else "✅ الخدمة تعمل — يتم استخدام OpenRouter")
     // ✅ تهيئة المحلل المناسب حسب الوضع المختار من الواجهة
-    aiAnalyzer = if (useLocalAi) {
-        LocalAiAnalyzer(this)
+    if (useLocalAi) {
+        // مسار قديم بدون أي تعديل: محلي فقط، بدون سحابة إطلاقاً
+        aiAnalyzer = LocalAiAnalyzer(this)
+        localGateAnalyzer = null
     } else {
-        DirectOpenRouterAnalyzer(openRouterApiKey)
+        // ✅ جديد: الوضع الهجين — بوابة محلية سريعة + سحابة كتصعيد عند الاشتباه فقط
+        localGateAnalyzer = LocalAiAnalyzer(this)
+        aiAnalyzer = DirectOpenRouterAnalyzer(openRouterApiKey)
     }
 
     val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -190,7 +204,7 @@ class ScreenMonitorService : Service() {
     isCapturing  = true
     handler.post(captureRunnable)
     Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — محلل محلي (LocalAiAnalyzer)"
-                      else "✅ الخدمة تعمل — يتم استخدام OpenRouter (قائمة موديلات مجانية ديناميكية)")
+                      else "✅ الخدمة تعمل — وضع هجين: بوابة محلية سريعة + تصعيد سحابي عند الاشتباه")
 }
 
     // ✅ أبعاد الالتقاط الفعلية المستخدمة هذه الجلسة — تُحسب بحيث تحافظ على
@@ -302,28 +316,26 @@ class ScreenMonitorService : Service() {
             isAnalyzing = true
             serviceScope.launch {
                 try {
-                    val result = aiAnalyzer?.analyze(bitmap)
-                    val isUnsafe = result?.isUnsafe ?: false
-
-                    if (isUnsafe) {
-                        safeCount = 0
-                        // ✅ نمرر المناطق المكتشفة إن وجدت (الوضع السحابي/الباك اند) —
-                        // وإن كانت null (الوضع المحلي) سيُغطّى الشاشة بالكامل كالسابق
-                        overlayManager?.showOverlay(result?.regions)
-                        Log.d("Ghadhoo", "🚨 تم التعتيم! (مناطق=${result?.regions?.size ?: "شاشة كاملة"})")
+                    if (useLocalAi) {
+                        // مسار قديم بدون أي تعديل: محلي فقط، بدون سحابة إطلاقاً
+                        val result = aiAnalyzer?.analyze(bitmap)
+                        applyAnalysisResult(result)
                     } else {
-                        safeCount++
-                        if (safeCount >= safeRequired) {
-                            overlayManager?.removeOverlay()
+                        // ✅ جديد: المسار الهجين — بوابة محلية سريعة أولاً (كل إطار)،
+                        // والسحابة (البطيئة) لا تُستدعى إلا لو البوابة اشتبهت فعلاً.
+                        // هذا يحل مشكلة التأخير المستمر: الحالة الشائعة (آمن) سريعة
+                        // ومحلية بالكامل، والتأخير يقتصر على اللحظات النادرة اللي
+                        // فيها محتوى مشتبه به وفعلاً محتاجة تحديد موقع الحجب بدقة.
+                        val gateResult = localGateAnalyzer?.analyze(bitmap)
+
+                        if (gateResult?.isUnsafe != true) {
+                            // البوابة المحلية قالت آمن — نكتفي بها، مفيش داعي للسحابة
+                            applyAnalysisResult(gateResult)
+                        } else {
+                            Log.d("Ghadhoo", "🔎 البوابة المحلية اشتبهت في محتوى غير آمن — تصعيد للسحابة لتحديد موقع الحجب...")
+                            escalateToCloud(bitmap)
                         }
                     }
-                } catch (e: RateLimitExceededException) {
-                    // ✅ تجاوز الحصة المجانية اليومية لكل موديلات OpenRouter
-                    // المجانية — نتراجع تلقائياً إلى الباك اند الخاص بنا
-                    // (BackendApiAi على Render) بدل المحلل المحلي، حتى تستمر
-                    // دقة الحجب بالمناطق (regions) بدل التعتيم الكامل للشاشة
-                    Log.w("Ghadhoo", "🛑 RateLimitExceeded: ${e.message} — التراجع إلى الباك اند")
-                    handleRateLimitFallbackToBackend()
                 } catch (e: Exception) {
                     Log.e("Ghadhoo", "❌ خطأ غير متوقع أثناء التحليل: ${e.message}")
                 } finally {
@@ -336,6 +348,58 @@ class ScreenMonitorService : Service() {
             isAnalyzing = false
         } finally {
             image.close()
+        }
+    }
+
+    // ✅ جديد: يطبّق نتيجة تحليل (محلي أو سحابي) على الـ overlay وsafeCount —
+    // منطق موحّد يستخدمه كل من المسار المحلي البحت والبوابة المحلية بالوضع
+    // الهجين، لتفادي تكرار نفس الكود في مكانين.
+    private fun applyAnalysisResult(result: AnalysisResult?) {
+        val isUnsafe = result?.isUnsafe ?: false
+
+        if (isUnsafe) {
+            safeCount = 0
+            // ✅ نمرر المناطق المكتشفة إن وجدت (تصعيد سحابي/الباك اند) —
+            // وإن كانت null (بوابة محلية أو محلي بحت) سيُغطّى الشاشة بالكامل كالسابق
+            overlayManager?.showOverlay(result?.regions)
+            Log.d("Ghadhoo", "🚨 تم التعتيم! (مناطق=${result?.regions?.size ?: "شاشة كاملة"})")
+        } else {
+            safeCount++
+            if (safeCount >= safeRequired) {
+                overlayManager?.removeOverlay()
+            }
+        }
+    }
+
+    // ✅ جديد: يُستدعى فقط لما البوابة المحلية تشتبه في محتوى غير آمن —
+    // يبعت نفس الإطار للسحابة (aiAnalyzer) عشان يجيب موقع الحجب الدقيق
+    // (regions)، مع نفس سلسلة التراجع القديمة (429 على كل الموديلات →
+    // الباك اند → محلي كضمانة أخيرة لو الباك اند نفسه مش متاح).
+    private suspend fun escalateToCloud(bitmap: Bitmap) {
+        try {
+            val cloudResult = aiAnalyzer?.analyze(bitmap)
+            applyAnalysisResult(cloudResult)
+        } catch (e: RateLimitExceededException) {
+            Log.w("Ghadhoo", "🛑 RateLimitExceeded: ${e.message} — التراجع إلى الباك اند")
+            handleRateLimitFallbackToBackend()
+            // إعادة محاولة فورية بنفس الإطار الحالي بعد التحويل للباك اند،
+            // بدل انتظار دورة التقاط جديدة كاملة
+            try {
+                val fallbackResult = aiAnalyzer?.analyze(bitmap)
+                applyAnalysisResult(fallbackResult)
+            } catch (e2: Exception) {
+                Log.e("Ghadhoo", "❌ فشل التصعيد السحابي بالكامل بعد اشتباه محلي: ${e2.message}")
+                // البوابة المحلية أصلاً اشتبهت — الأمان أولاً: نعتّم الشاشة
+                // كاملة احتياطياً بدل ما نسيب المحتوى المشتبه به من غير حجب
+                overlayManager?.showOverlay(null)
+                safeCount = 0
+            }
+        } catch (e: Exception) {
+            Log.e("Ghadhoo", "❌ خطأ غير متوقع أثناء التصعيد السحابي: ${e.message}")
+            // نفس المنطق: البوابة المحلية اشتبهت، فلو السحابة فشلت لأي سبب
+            // آخر (شبكة، إلخ) نعتّم احتياطياً بدل ترك المحتوى بلا حجب
+            overlayManager?.showOverlay(null)
+            safeCount = 0
         }
     }
 
@@ -366,6 +430,10 @@ class ScreenMonitorService : Service() {
 
         aiAnalyzer?.close()
         aiAnalyzer        = null
+
+        // ✅ جديد: إغلاق وتصفير البوابة المحلية (الوضع الهجين)
+        localGateAnalyzer?.close()
+        localGateAnalyzer = null
 
         overlayManagerRef = null
         overlayManager    = null

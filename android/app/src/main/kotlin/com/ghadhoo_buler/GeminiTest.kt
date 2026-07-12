@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
 /**
  * ✅ استثناء يُرمى عندما تفشل كل المحاولات المتاحة بسبب تجاوز الحصة المجانية
  * (HTTP 429) على كل الموديلات المُجرَّبة. يُستخدم من ScreenMonitorService
- * لاكتشاف هذه الحالة بدقة والتراجع التلقائي إلى المحلل المحلي.
+ * لاكتشاف هذه الحالة بدقة والتراجع التلقائي إلى الباك اند.
  */
 class RateLimitExceededException(message: String) : Exception(message)
 
@@ -38,10 +38,20 @@ class RateLimitExceededException(message: String) : Exception(message)
  * التي (أ) مجانية فعلاً (pricing = 0) و(ب) تدعم إدخال صور (Vision).
  * القائمة تُخزَّن مؤقتاً (cache) لمدة ساعة لتفادي استدعاء إضافي بكل تحليل.
  *
- * عند التحليل: نجرّب الموديلات المُصفّاة بالتتابع (حتى MAX_MODELS_TO_TRY)
+ * ✅ جديد: ترتيب أولوية الموديلات (وليس فلترة/استبعاد أي منها):
+ * موديلات الرؤية العامة (Vision LLMs قادرة على إرجاع bounding boxes ضمن
+ * JSON) تُجرَّب أولاً، لأنها الوحيدة القادرة فعلياً على حجب مناطق محددة
+ * بدقة. أما موديلات تصنيف الأمان النصية البحتة (مثل
+ * nvidia/nemotron-*-content-safety، التي ترد بصيغة "User Safety: unsafe"
+ * بدون أي إحداثيات على الإطلاق — راجع parseTextSafetyResponse أدناه) فتُدفع
+ * لنهاية قائمة المحاولة، وتُستخدم فقط كخط دفاع أخير سريع لو باقي الموديلات
+ * فشلت. هذا يعني حجباً دقيقاً بالمناطق في أغلب الحالات بدل تعتيم الشاشة
+ * كاملة، مع الحفاظ على نفس الحماية الاحتياطية القديمة.
+ *
+ * عند التحليل: نجرّب الموديلات المُرتَّبة بالتتابع (حتى MAX_MODELS_TO_TRY)
  * — كل موديل يُعطى فرصة واحدة سريعة، وأي 429 ينتقل للموديل التالي فوراً
  * (بدل انتظار طويل على نفس الموديل المزدحم). فقط لو فشلت كلها بـ429
- * يُرمى RateLimitExceededException ليتم التراجع للمحلل المحلي.
+ * يُرمى RateLimitExceededException ليتم التراجع للباك اند.
  * ══════════════════════════════════════════════════════════════════════
  */
 class DirectOpenRouterAnalyzer(
@@ -71,21 +81,61 @@ class DirectOpenRouterAnalyzer(
         // مدة صلاحية كاش قائمة الموديلات المجانية (ساعة واحدة)
         private const val MODEL_LIST_CACHE_MS = 60 * 60 * 1000L
 
+        // ✅ جديد: كلمات مفتاحية تُعرِّف موديلات تصنيف الأمان النصية البحتة
+        // (لا ترجع bounding boxes أبداً، فقط "آمن/غير آمن" كنص). أي موديل
+        // معرّفه (id) يحتوي أياً من هذه الكلمات يُعتبر "آخر الطابور" في
+        // ترتيب المحاولة — لا يُستبعد، فقط يُؤجَّل بعد موديلات الرؤية العامة.
+        private val SAFETY_CLASSIFIER_KEYWORDS = listOf(
+            "content-safety", "-safety", "safety-", "guard", "moderation", "moderator"
+        )
+
+        // ✅ جديد: كلمات مفتاحية تُعرِّف موديلات "التفكير الممتد" (reasoning/
+        // thinking) — أبطأ بطبيعتها بسبب خطوات التفكير الداخلية، حتى لو
+        // كانت قادرة على تحديد المناطق (regions) بدقة. تُجرَّب بعد موديلات
+        // الرؤية السريعة العادية، لكن قبل موديلات تصنيف الأمان النصية
+        // (اللي مالهاش تحديد مناطق إطلاقاً).
+        private val REASONING_MODEL_KEYWORDS = listOf("reasoning", "thinking")
+
         // ✅ كاش مشترك بين كل نسخ الكلاس (companion) — يمنع استدعاء
         // /models في كل تحليل، ويُحدَّث تلقائياً كل ساعة أو عند الفشل الكامل
         @Volatile private var cachedFreeVisionModels: List<String> = emptyList()
         @Volatile private var cacheTimestamp: Long = 0L
+
+        // يتحقق هل معرّف الموديل يطابق نمط موديلات تصنيف الأمان النصية
+        private fun isSafetyClassifierModel(modelId: String): Boolean {
+            val lower = modelId.lowercase()
+            return SAFETY_CLASSIFIER_KEYWORDS.any { lower.contains(it) }
+        }
+
+        // ✅ جديد: يتحقق هل معرّف الموديل يطابق نمط موديلات التفكير الممتد
+        private fun isReasoningModel(modelId: String): Boolean {
+            val lower = modelId.lowercase()
+            return REASONING_MODEL_KEYWORDS.any { lower.contains(it) }
+        }
+
+        // ✅ جديد: رتبة الأولوية — 0 = رؤية سريعة عادية (الأفضل والأسرع)،
+        // 1 = رؤية بتفكير ممتد (أبطأ لكن لسه بترجع مناطق)، 2 = تصنيف نصي
+        // بحت (الأسرع لكن بلا مناطق إطلاقاً — آخر الطابور)
+        private fun modelPriorityTier(modelId: String): Int = when {
+            isSafetyClassifierModel(modelId) -> 2
+            isReasoningModel(modelId)        -> 1
+            else                              -> 0
+        }
     }
 
+    // ✅ جديد: تقليل المهلات من (8s/15s/10s) — لو مزوّد موديل معيّن مزدحم
+    // (رفض بطيء زي ما شفنا في اللوج: 429 بعد 5+ ثوانٍ)، أفضل نستسلم بسرعة
+    // وننتقل للموديل التالي بدل انتظار طويل يعطّل السلسلة كلها.
     private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .writeTimeout(6, TimeUnit.SECONDS)
         .build()
 
     // ══════════════════════════════════════════════════════════════════════
     // analyze: يجلب (أو يستخدم الكاش) قائمة الموديلات المجانية الداعمة
-    // للصور، ثم يجرّبها بالتتابع. أي 429 ينتقل فوراً للموديل التالي.
+    // للصور (مُرتَّبة: رؤية عامة أولاً، تصنيف نصي أخيراً)، ثم يجرّبها
+    // بالتتابع. أي 429 ينتقل فوراً للموديل التالي.
     // فقط لو فشلت كل المحاولات بـ429 يُرمى RateLimitExceededException.
     // ══════════════════════════════════════════════════════════════════════
     override suspend fun analyze(bitmap: Bitmap): AnalysisResult = withContext(Dispatchers.IO) {
@@ -143,7 +193,7 @@ class DirectOpenRouterAnalyzer(
             if (fetched.isNotEmpty()) {
                 cachedFreeVisionModels = fetched
                 cacheTimestamp = now
-                Log.d(TAG, "🔄 تحديث قائمة الموديلات المجانية: ${fetched.size} موديل متاح — $fetched")
+                Log.d(TAG, "🔄 تحديث قائمة الموديلات المجانية (رؤية عامة أولاً): ${fetched.size} موديل متاح — $fetched")
                 fetched
             } else if (cachedFreeVisionModels.isNotEmpty()) {
                 // فشل التحديث لكن عندنا كاش قديم — أفضل من لا شي
@@ -159,7 +209,8 @@ class DirectOpenRouterAnalyzer(
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // يستدعي GET /api/v1/models ويُصفّي: مجانية (pricing=0) + تدعم صور
+    // يستدعي GET /api/v1/models ويُصفّي: مجانية (pricing=0) + تدعم صور،
+    // ثم يُرتّب النتيجة (رؤية عامة أولاً، تصنيف أمان نصي أخيراً) — ✅ جديد
     // ══════════════════════════════════════════════════════════════════════
     private fun fetchFreeVisionModelsFromApi(): List<String> {
         val request = Request.Builder()
@@ -205,9 +256,19 @@ class DirectOpenRouterAnalyzer(
                 }
                 if (!supportsImage) continue
 
+                // ✅ الاقتصار على عائلة Nvidia Nemotron فقط (nvidia/nemotron-*)
+                if (!id.contains("nvidia/nemotron", ignoreCase = true)) continue
+
                 result.add(id)
             }
-            return result
+
+            // ✅ جديد: إعادة ترتيب بدون استبعاد — 3 مستويات أولوية:
+            // 0) رؤية سريعة عادية أولاً (الأفضل: دقة + سرعة)
+            // 1) رؤية بتفكير ممتد (reasoning/thinking) بعدها — أبطأ لكن لسه دقيقة
+            // 2) تصنيف أمان نصي بحت أخيراً — الأسرع، لكن بلا مناطق إطلاقاً
+            // sortedBy مستقرة (stable) فتحافظ على الترتيب الأصلي داخل كل
+            // مجموعة كما أرجعه OpenRouter.
+            return result.sortedBy { modelId -> modelPriorityTier(modelId) }
         }
     }
 
@@ -218,21 +279,26 @@ class DirectOpenRouterAnalyzer(
     private fun requestAnalysis(modelId: String, base64Image: String): AnalysisResult {
         val prompt = """
             Analyze this screen image for inappropriate or unsafe content.
-            Return ONLY a JSON object with the following exact structure, and
-            nothing else (no markdown, no extra text):
+            The screen may contain MULTIPLE separate items (e.g., video
+            thumbnails, images, ads, profile pictures). Judge EACH item
+            independently — do not judge the screen as one unit.
+
+            For every unsafe item only, add one entry in "regions" with a
+            tight box around just that item. Skip safe items entirely.
+
+            Return ONLY this JSON, nothing else:
             {
               "is_unsafe": boolean,
-              "confidence": integer between 0 and 100,
-              "reason": "short explanation of the detection",
+              "confidence": integer 0-100,
+              "reason": "short explanation",
               "regions": [
-                {
-                  "label": "name of unsafe element",
-                  "box": [y_min, x_min, y_max, x_max]
-                }
+                {"label": "string", "x_min": int, "y_min": int, "x_max": int, "y_max": int}
               ]
             }
-            Coordinates in "box" must be scaled 0 to 1000.
-            If the image is completely safe, return "is_unsafe": false and an empty "regions" array.
+            Coordinates are 0-1000, relative to image width (x) and height
+            (y). x_min<x_max, y_min<y_max. is_unsafe=true if at least one
+            item is unsafe; false with empty regions only if all are safe.
+            Be quick and decisive — do not overthink simple cases.
         """.trimIndent()
 
         val requestBodyJson = buildRequestBody(modelId, prompt, base64Image)
@@ -346,6 +412,17 @@ class DirectOpenRouterAnalyzer(
             put("response_format", JSONObject().apply {
                 put("type", "json_object")
             })
+            // ✅ جديد: تقليل "مجهود التفكير" (reasoning effort) للموديلات
+            // اللي بتدعم تفكير ممتد (زي nemotron-*-reasoning). المهمة هنا
+            // بسيطة نسبياً (تصنيف + إحداثيات) ومطلوب سرعة استجابة أعلى من
+            // العمق، خصوصاً إن الطلب بيتكرر كل بضع ثوانٍ. الموديلات اللي
+            // مالهاش وضع تفكير أصلاً بتتجاهل الحقل ده بأمان.
+            put("reasoning", JSONObject().apply {
+                put("effort", "low")
+            })
+            // ✅ جديد: سقف معقول لطول الرد — كافٍ لأكبر عدد متوقع من
+            // المناطق، ويمنع الموديل من الاستطراد أو التفكير المطوّل الزائد
+            put("max_tokens", 700)
         }
     }
 
@@ -371,13 +448,16 @@ class DirectOpenRouterAnalyzer(
 
     // ══════════════════════════════════════════════════════════════════════
     // تحليل الرد. يدعم صيغتين:
-    // 1) JSON القياسي (المطلوب بالـ prompt) — لمعظم موديلات الـ Vision العامة.
+    // 1) JSON القياسي (المطلوب بالـ prompt) — لمعظم موديلات الـ Vision العامة،
+    //    وهي التي تُجرَّب أولاً الآن بعد إعادة الترتيب أعلاه، فتُرجع مناطق
+    //    محددة (regions) في أغلب الأحيان.
     // 2) صيغة نصية بسيطة يستخدمها موديل nvidia/nemotron-3.5-content-safety
-    //    (وموديلات تصنيف أمان محتوى مشابهة قد تُختار ديناميكياً من القائمة):
+    //    (وموديلات تصنيف أمان محتوى مشابهة، تُجرَّب الآن أخيراً كاحتياط):
     //    "User Safety: safe"
     //    "User Safety: unsafe\nSafety Categories: Sexual, Profanity"
-    //    هذا الموديل لا يتبع تعليمات JSON لأنه مصمم لغرض تصنيف ثابت فقط،
-    //    لكنه مفيد جداً هنا لأنه مخصص أصلاً لتصنيف أمان المحتوى.
+    //    هذا الموديل لا يتبع تعليمات JSON لأنه مصمم لغرض تصنيف ثابت فقط
+    //    (لا يعرف الإحداثيات إطلاقاً)، لكنه مفيد كخط دفاع أخير سريع وموثوق
+    //    لأنه مخصص أصلاً لتصنيف أمان المحتوى.
     // ══════════════════════════════════════════════════════════════════════
     private fun parseResponse(body: String): AnalysisResult {
         return try {
@@ -390,6 +470,54 @@ class DirectOpenRouterAnalyzer(
                 AnalysisResult(false)
             }
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ جديد: يستخرج RectF من كائن منطقة (region) واحد، بأسلوبين:
+    // 1) الحقول الصريحة x_min/y_min/x_max/y_max (المطلوبة في الـ prompt
+    //    الجديد) — لا لبس فيها إطلاقاً بغض النظر عن الموديل المستخدم.
+    // 2) صيغة احتياطية قديمة "box": [a, b, c, d] لو موديل تجاهل التعليمة
+    //    الجديدة رغم كل شيء — نفترض ترتيب [x_min, y_min, x_max, y_max]
+    //    (الأكثر شيوعاً بين موديلات الرؤية غير Gemini) بدل الترتيب القديم
+    //    [y_min, x_min, y_max, x_max] الذي كان يسبب انعكاس المحاور.
+    // في الحالتين: نتحقق إن min < max ونبدّلهما لو معكوسين (حماية إضافية
+    // من موديلات ضعيفة قد ترجع القيم بترتيب عشوائي)، ونقصّهما لمدى 0..1000.
+    // ══════════════════════════════════════════════════════════════════════
+    private fun extractRegionRect(region: JSONObject): RectF? {
+        val hasNamedFields = region.has("x_min") && region.has("y_min") &&
+                             region.has("x_max") && region.has("y_max")
+
+        var xMin: Int; var yMin: Int; var xMax: Int; var yMax: Int
+
+        if (hasNamedFields) {
+            xMin = region.optInt("x_min", -1)
+            yMin = region.optInt("y_min", -1)
+            xMax = region.optInt("x_max", -1)
+            yMax = region.optInt("y_max", -1)
+        } else {
+            val box = region.optJSONArray("box") ?: return null
+            if (box.length() != 4) return null
+            // احتياطي: نفترض ترتيب [x_min, y_min, x_max, y_max] القياسي
+            xMin = box.optInt(0, -1)
+            yMin = box.optInt(1, -1)
+            xMax = box.optInt(2, -1)
+            yMax = box.optInt(3, -1)
+        }
+
+        if (xMin < 0 || yMin < 0 || xMax < 0 || yMax < 0) return null
+
+        // حماية من انعكاس min/max (بعض الموديلات الضعيفة قد تخطئ بالترتيب)
+        if (xMin > xMax) { val t = xMin; xMin = xMax; xMax = t }
+        if (yMin > yMax) { val t = yMin; yMin = yMax; yMax = t }
+
+        val left   = xMin.coerceIn(0, 1000) / 1000f
+        val top    = yMin.coerceIn(0, 1000) / 1000f
+        val right  = xMax.coerceIn(0, 1000) / 1000f
+        val bottom = yMax.coerceIn(0, 1000) / 1000f
+
+        if (right <= left || bottom <= top) return null // صندوق تافه/فاسد
+
+        return RectF(left, top, right, bottom)
     }
 
     private fun parseJsonResponse(body: String): AnalysisResult {
@@ -406,17 +534,13 @@ class DirectOpenRouterAnalyzer(
             for (i in 0 until regionsArr.length()) {
                 val region = regionsArr.getJSONObject(i)
                 val label  = region.optString("label", "")
-                val box    = region.optJSONArray("box")
+                val rect   = extractRegionRect(region)
 
-                if (box != null && box.length() == 4) {
-                    val rect = RectF(
-                        box.getInt(1) / 1000f,   // left  = x_min
-                        box.getInt(0) / 1000f,   // top   = y_min
-                        box.getInt(3) / 1000f,   // right = x_max
-                        box.getInt(2) / 1000f    // bottom= y_max
-                    )
+                if (rect != null) {
                     regions.add(RegionResult(label = label, bounds = rect, confidence = 1.0f))
                     Log.d(TAG, "📍 منطقة: $label → $rect")
+                } else {
+                    Log.w(TAG, "⚠️ منطقة تم تجاهلها لعدم وجود إحداثيات صالحة: $region")
                 }
             }
         }
@@ -451,9 +575,11 @@ class DirectOpenRouterAnalyzer(
         if (isUnsafe) Log.w(TAG, "🚨 محتوى غير آمن (تصنيف نصي)! فئات: $categories")
         else          Log.d(TAG, "✅ المحتوى آمن (تصنيف نصي)")
 
-        // هذا الموديل لا يرجع درجة ثقة رقمية ولا مناطق محددة (bounding boxes)،
-        // فنعتمد تصنيفه الثنائي مباشرة (بدون بوابة UNSAFE_THRESHOLD لأنها
-        // مصممة لموديلات JSON التي ترجع نسبة ثقة فعلية)
+        // هذا الموديل لا يرجع درجة ثقة رقمية ولا مناطق محددة (bounding boxes)
+        // إطلاقاً — لذلك regions = null دايماً هنا، وOverlayManager سيلجأ
+        // تلقائياً لتغطية الشاشة كاملة في هذه الحالة فقط (راجع buildOverlayContent
+        // في OverlayManager.kt). بعد إعادة الترتيب أعلاه، هذا يحدث فقط عندما
+        // تفشل/تُستنفد كل موديلات الرؤية العامة أولاً.
         return AnalysisResult(
             isUnsafe   = isUnsafe,
             regions    = null,

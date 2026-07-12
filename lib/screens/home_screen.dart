@@ -7,6 +7,10 @@ import 'package:safety_screen/themes/gold_ornament.dart';
 import 'package:safety_screen/themes/islamic_background.dart';
 import 'package:safety_screen/widgets/islamic_card.dart';
 import 'package:safety_screen/widgets/mode_card.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter_styled_toast/flutter_styled_toast.dart';
+import 'dart:async';
+import 'dart:io' show InternetAddress, SocketException;
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -27,6 +31,17 @@ class _SafeScreenHomeState extends State<HomeScreen>
   // ✅ متغير واحد بدل اثنين: true = محلي، false = احترافي (سحابي)
   // القيمة الافتراضية محلي دائماً عند أول فتح للتطبيق (لا يُحمَّل من تفضيلات محفوظة)
   bool _useLocalAi = true;
+
+  // ✅ جديد: حالة الاتصال بالإنترنت — تتحكم بتعطيل بطاقة "احترافي" فوراً
+  // (مو بس وقت الضغط) عبر مراقبة مستمرة لتغيّر الاتصال
+  bool _hasInternet = true;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+
+  // ✅ جديد: فحص دوري للاتصال الفعلي بالإنترنت (وليس فقط توفر واي فاي/بيانات
+  // كواجهة). يغطي حالة "متصل بالراوتر لكن بدون إنترنت خلفه" التي لا يكتشفها
+  // connectivity_plus وحده لأنه يقرأ نوع الواجهة فقط دون اختبار وصول فعلي
+  Timer? _internetCheckTimer;
+  bool _isCheckingInternet = false;
 
   late AnimationController _pulseController;
   late AnimationController _rotateController;
@@ -57,12 +72,85 @@ class _SafeScreenHomeState extends State<HomeScreen>
     );
     _loadAndroidVersion();
     _checkInitialStatus();
+    _initConnectivityMonitoring();
+  }
+
+  // ✅ يفحص الاتصال فوراً عند فتح الشاشة، ثم يراقب أي تغيير لاحق (تفعيل/
+  // إيقاف الواي فاي أو بيانات الجوال، أو انقطاع الإنترنت الفعلي خلف اتصال
+  // ظاهرياً "شغال") ويحدّث _hasInternet تلقائياً — هذا يخلي بطاقة "احترافي"
+  // تتعطّل بصرياً فوراً لحظة انقطاع الإنترنت، بدون ما ينتظر المستخدم يضغط
+  // عليها الأول
+  Future<void> _initConnectivityMonitoring() async {
+    await _refreshInternetStatus();
+
+    // أي تغيّر بنوع الواجهة (واي فاي/بيانات/لا شيء) يستدعي فحصاً فعلياً فوراً
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((_) {
+      _refreshInternetStatus();
+    });
+
+    // ✅ جديد: فحص دوري كل 10 ثوانٍ — يغطي حالة "واي فاي/بيانات شغالة لكن
+    // بدون إنترنت فعلي خلفها" (مثلاً راوتر متصل بلا خط)، وهي حالة لا يُصدر
+    // فيها connectivity_plus أي حدث تغيير لأن الواجهة نفسها لم تتغيّر
+    _internetCheckTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _refreshInternetStatus();
+    });
+  }
+
+  // ✅ جديد: يجمع بين فحص توفر واجهة الاتصال (واي فاي/بيانات) وفحص وصول
+  // فعلي حقيقي للإنترنت (DNS lookup)، ويحدّث _hasInternet بناءً على النتيجة
+  // الحقيقية فقط — لا يكفي أن تكون الواجهة "شغالة" لاعتبار الإنترنت متوفراً
+  Future<void> _refreshInternetStatus() async {
+    if (_isCheckingInternet) return;
+    _isCheckingInternet = true;
+    try {
+      final transportResults = await Connectivity().checkConnectivity();
+      final hasTransport = !transportResults.contains(ConnectivityResult.none);
+
+      final actuallyConnected =
+          hasTransport ? await _hasActualInternetAccess() : false;
+
+      if (mounted && actuallyConnected != _hasInternet) {
+        setState(() => _hasInternet = actuallyConnected);
+      }
+    } finally {
+      _isCheckingInternet = false;
+    }
+  }
+
+  // ✅ جديد: فحص وصول فعلي للإنترنت عبر محاولة DNS lookup لأكثر من نطاق
+  // معروف وموثوق (بدل الاعتماد على نطاق واحد فقط قد لا يكون مدعوماً في كل
+  // الشبكات/الدول أو يتأخر أحياناً)، بمهلة معقولة لكل محاولة. أول نطاق
+  // ينجح يكفي لاعتبار الاتصال فعلياً — هذا يقلّل من احتمال اعتبار الاتصال
+  // "مقطوعاً" خطأً بسبب مشكلة بنطاق واحد بعينه بينما الإنترنت شغال فعلاً
+  Future<bool> _hasActualInternetAccess() async {
+    const hosts = ['google.com', 'cloudflare.com', 'apple.com'];
+
+    for (final host in hosts) {
+      try {
+        final result = await InternetAddress.lookup(
+          host,
+        ).timeout(const Duration(seconds: 5));
+        if (result.isNotEmpty && result.first.rawAddress.isNotEmpty) {
+          return true;
+        }
+      } on SocketException {
+        continue; // جرّب النطاق التالي
+      } on TimeoutException {
+        continue; // جرّب النطاق التالي
+      } catch (_) {
+        continue; // جرّب النطاق التالي
+      }
+    }
+
+    return false; // فشلت كل المحاولات فعلاً
   }
 
   @override
   void dispose() {
     _pulseController.dispose();
     _rotateController.dispose();
+    _connectivitySub?.cancel();
+    _internetCheckTimer?.cancel();
     super.dispose();
   }
 
@@ -120,6 +208,64 @@ class _SafeScreenHomeState extends State<HomeScreen>
     } catch (e) {
       debugPrint("خطأ في إرسال وضع المحلل: $e");
     }
+  }
+
+  // ✅ جديد: توست مصمَّم بنفس هوية التطبيق (ذهبي على خلفية غامقة) بدل الشكل
+  // الافتراضي — يظهر أسفل الشاشة عند محاولة اختيار "احترافي" بدون إنترنت
+  void _showNoInternetToast() {
+    showToastWidget(
+      Container(
+        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        decoration: BoxDecoration(
+          color: _surface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _gold.withValues(alpha: 0.5), width: 1.2),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.35),
+              blurRadius: 14,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _gold.withValues(alpha: 0.12),
+              ),
+              child: Icon(Icons.wifi_off_rounded, color: _goldLight, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Text(
+                'لا يتوفر اتصال بالإنترنت',
+                style: TextStyle(
+                  color: _textMain,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  fontFamily: 'serif',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      context: context,
+      animation: StyledToastAnimation.slideFromBottomFade,
+      reverseAnimation: StyledToastAnimation.slideToBottomFade,
+      position: StyledToastPosition.bottom,
+      startOffset: const Offset(0.0, 3.0),
+      reverseEndOffset: const Offset(0.0, 3.0),
+      duration: const Duration(seconds: 3),
+      animDuration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutBack,
+      reverseCurve: Curves.easeIn,
+    );
   }
 
   String get _blurLabel {
@@ -380,18 +526,34 @@ class _SafeScreenHomeState extends State<HomeScreen>
               ),
               const SizedBox(width: 10),
               // ── احترافي (سحابي) ─────────────────────────────────────────
+              // ✅ ملاحظة: نضع GestureDetector شفاف فوق البطاقة بالكامل
+              // (Positioned.fill) بدل الاعتماد فقط على onTap الداخلي لـ
+              // ModeCard. لأن ModeCard على الأغلب توقف استقبال اللمس داخلياً
+              // بنفسها لما enabled=false (زي AbsorbPointer/IgnorePointer)،
+              // وهذا كان يمنع تنفيذ منطقنا (عرض التوست) من الأساس بعد أول
+              // مرة تتعطّل فيها البطاقة. الطبقة العلوية هنا تستقبل كل ضغطة
+              // بشكل مستقل تماماً عن الحالة الداخلية لـ ModeCard، فيضمن ظهور
+              // التوست في كل مرة يضغط فيها المستخدم أثناء انقطاع النت، وأيضاً
+              // يصحّح _hasInternet فوراً لحظة الضغط لو تبيّن أن النت رجع
+              // فعلياً (بدل انتظار الفحص الدوري كل 10 ثوانٍ).
               Expanded(
-                child: ModeCard(
-                  selected: isOnline,
-                  enabled: true,
-                  icon: Icons.cloud_outlined,
-                  title: 'احترافي',
-                  subtitle: 'دقة أعلى',
-                  onTap: () async {
-                    if (!_useLocalAi) return; // محدد بالفعل
-                    setState(() => _useLocalAi = false);
-                    await _pushAnalyzerMode();
-                  },
+                child: Stack(
+                  children: [
+                    ModeCard(
+                      selected: isOnline,
+                      enabled: _hasInternet,
+                      icon: Icons.cloud_outlined,
+                      title: 'احترافي',
+                      subtitle: _hasInternet ? 'دقة أعلى' : 'يتطلب إنترنت',
+                      onTap: _onTapProfessionalMode,
+                    ),
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _onTapProfessionalMode,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -399,6 +561,35 @@ class _SafeScreenHomeState extends State<HomeScreen>
         ],
       ),
     );
+  }
+
+  // ✅ جديد: معالج ضغط موحّد لبطاقة "احترافي" — يُستدعى من الطبقة الشفافة
+  // العلوية دائماً بغض النظر عن الحالة الداخلية لـ ModeCard، فيضمن:
+  // 1) ظهور توست "لا يتوفر اتصال بالإنترنت" في كل مرة يُضغط فيها والنت
+  //    فعلياً مقطوع (مو مرة وحدة بس).
+  // 2) تصحيح _hasInternet فوراً لحظة الضغط بالاتجاهين (لو النت رجع فعلياً
+  //    لكن الفحص الدوري لسا ما وصل، ولو انقطع لتوّه) — بدل انتظار المؤقت
+  //    الدوري (10 ثوانٍ) أو حدث تغيّر الواجهة اللي قد يتأخر أو ما يوصل.
+  Future<void> _onTapProfessionalMode() async {
+    final actuallyOnline = await _hasActualInternetAccess();
+
+    if (!actuallyOnline) {
+      if (mounted && _hasInternet) {
+        setState(() => _hasInternet = false);
+      }
+      _showNoInternetToast();
+      return;
+    }
+
+    // النت فعلاً متوفر الآن — تصحيح الحالة فوراً حتى لو كانت لا تزال
+    // مسجَّلة كمنقطعة من فحص سابق
+    if (mounted && !_hasInternet) {
+      setState(() => _hasInternet = true);
+    }
+
+    if (!_useLocalAi) return; // محدد بالفعل
+    setState(() => _useLocalAi = false);
+    await _pushAnalyzerMode();
   }
 
   Widget goldDivider() => Expanded(

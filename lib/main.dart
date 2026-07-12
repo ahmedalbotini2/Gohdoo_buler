@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:safety_screen/screens/onboarding_screen.dart';
-
-
 import 'package:safety_screen/screens/home_screen.dart';
 import 'package:safety_screen/screens/splash_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
