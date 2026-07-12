@@ -174,8 +174,6 @@ class ScreenMonitorService : Service() {
         
         }
 
-        val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = projMgr.getMediaProjection(resultCode, resultData)
 
         if (isA12) setupVirtualDisplay12() else setupVirtualDisplay11()
 
