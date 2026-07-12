@@ -27,7 +27,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import com.ghadhoo_buler.BuildConfig
 
 class ScreenMonitorService : Service() {
 
@@ -36,21 +35,19 @@ class ScreenMonitorService : Service() {
         const val ACTION_STOP       = "ACTION_STOP"
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_RESULT_DATA = "EXTRA_RESULT_DATA"
-        var openRouterApiKey = BuildConfig.OPENROUTER_API_KEY// ✅ مفتاح OpenRouter — استبدله بمفتاحك الخاص
 
-        // ✅ جديد: بيانات الباك اند (Laravel على Render) — تُستخدم كخط دفاع
-        // ثانٍ عندما يستنفد DirectOpenRouterAnalyzer كل الموديلات المجانية
-        // ويرمي RateLimitExceededException (429 على كل المحاولات).
-        // أضِف القيمتين في build.gradle عبر buildConfigField (نفس أسلوب
-        // OPENROUTER_API_KEY أعلاه) بدل كتابتهما هنا مباشرة.
-        var backendBaseUrl = BuildConfig.BACKEND_BASE_URL
-        var backendAppKey  = BuildConfig.BACKEND_APP_KEY
+        // ❌ أُزيلت مفاتيح ونقاط نهاية السحابة (OpenRouter / الباك اند) —
+        // لم تعد مستخدمة بعد التحويل الكامل لخط أنابيب محلي بالكامل
+        // (nsfw.tflite + yolo11n.tflite)، بلا أي اتصال إنترنت في مسار التحليل.
 
         var isMonitoring = false
             private set
 
-        // ✅ جديد: وضع المحلل — محلي افتراضيًا عند كل تشغيل للتطبيق
+        // ✅ وضع المحلل — محلي (سريع/عام) افتراضيًا عند كل تشغيل للتطبيق
         // (لا يُخزَّن بين الجلسات عمداً، حتى يبدأ التطبيق دائماً بالخصوصية الكاملة أولاً)
+        //   - useLocalAi = true  → "اعتيادي": LocalAiAnalyzer فقط، يحجب الشاشة كاملة عند الاشتباه
+        //   - useLocalAi = false → "احترافي": LocalAiAnalyzer كبوابة + YoloPersonAnalyzer
+        //                          لتحديد موقع الحجب بدقة (شخص/أشخاص فقط) — كله محلي، بدون سحابة
         var useLocalAi = true
             private set
 
@@ -58,46 +55,36 @@ class ScreenMonitorService : Service() {
         fun setBlurRadius(radius: Float) { overlayManagerRef?.blurRadius = radius }
         fun setOverlayColor(color: Int)  { overlayManagerRef?.overlayColor = color }
 
-        // ✅ جديد: يستقبل اختيار الوضع من Flutter عبر MainActivity
+        // ✅ يستقبل اختيار الوضع من Flutter عبر MainActivity
         fun setAnalyzerMode(local: Boolean) {
             useLocalAi = local
-            Log.d("Ghadhoo", "🔄 تم تغيير وضع المحلل إلى: ${if (local) "محلي" else "احترافي (سحابي)"}")
+            Log.d("Ghadhoo", "🔄 تم تغيير وضع المحلل إلى: ${if (local) "عادي (حجب كامل)" else "احترافي (حجب دقيق محلي عبر YOLO)"}")
         }
     }
 
     private var mediaProjection: MediaProjection?   = null
     private var overlayManager: OverlayManager?     = null
 
-    // ✅ يمنع تكرار رسالة/عملية التراجع للسيرفر الاحتياطي إذا تكرر 429 أكثر
-    // من مرة بالجلسة الواحدة
-    private var rateLimitFallbackTriggered = false
-
-    // ✅ يمنع تكرار التراجع الثاني (من الباك اند إلى المحلي) أكثر من مرة —
-    // يُستخدم فقط لو الباك اند نفسه غير متاح (مثلاً السيرفر نايم على
-    // Render Free Tier ولسه ما "صحيش")
-    private var backendFallbackTriggered = false
-
-    // استخدام الواجهة المشتركة — يتم اختيار التطبيق الفعلي (محلي/سحابي) في startMonitoring()
-    private var aiAnalyzer: ContentAnalyzer?        = null
-
-    // ✅ جديد: في الوضع الهجين (احترافي/سحابي) فقط — بوابة محلية سريعة
-    // (نفس LocalAiAnalyzer بدون أي تعديل عليه) تُفحص كل إطار أولاً. السحابة
-    // (aiAnalyzer أعلاه) لا تُستدعى إلا لو هذه البوابة اشتبهت في المحتوى،
-    // مما يجعل الوضع السحابي سريعاً في الحالة الشائعة (آمن) ويقتصر التأخير
-    // على اللحظات النادرة اللي فعلاً محتاجة تحديد دقيق لموقع الحجب.
-    // تبقى null في الوضع المحلي البحت (useLocalAi = true) — غير مستخدمة هناك.
+    // البوابة الأولى في كل الأحوال: تصنّف كل إطار آمن/غير آمن (nsfw.tflite)
+    // - في الوضع العادي: هي المحلل الوحيد المستخدم
+    // - في الوضع الاحترافي: تُستخدم كبوابة سريعة، ثم يُستدعى YOLO فقط عند الاشتباه
     private var localGateAnalyzer: LocalAiAnalyzer? = null
+
+    // ✅ جديد: يحل محل المحلل السحابي سابقاً. يشغّل yolo11n.tflite محلياً
+    // على الجهاز لتحديد صناديق "شخص" داخل الصورة عندما تشتبه البوابة
+    // المحلية (localGateAnalyzer) بمحتوى غير آمن. يبقى null في الوضع
+    // العادي (useLocalAi = true) — غير مستخدم هناك.
+    private var yoloAnalyzer: YoloPersonAnalyzer? = null
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val handler      = Handler(Looper.getMainLooper())
-    // ✅ جديد: وقت التقاط ثابت وسريع للحالتين. في الوضع الهجين (احترافي)،
-    // كل إطار يمر أولاً على بوابة محلية سريعة (LocalAiAnalyzer) — السحابة
-    // البطيئة تُستدعى فقط لو البوابة المحلية اشتبهت، مش كل إطار. لذلك مفيش
-    // داعي لإبطاء الالتقاط بشكل عام زي قبل.
+
+    // ✅ وقت التقاط ثابت وسريع للحالتين. في الوضع الاحترافي، كل إطار يمر
+    // أولاً على البوابة المحلية السريعة (nsfw.tflite) — YOLO (أثقل قليلاً)
+    // لا يُستدعى إلا لو البوابة اشتبهت، مش كل إطار.
     private val captureMs: Long = 1000L
     private var isCapturing  = false
-    // ✅ يمنع بدء تحليل جديد قبل اكتمال التحليل الحالي (مهم خصوصاً مع تدوير
-    // الموديلات السحابية، حيث قد تستغرق دورة كاملة وقتاً أطول من captureMs)
+    // ✅ يمنع بدء تحليل جديد قبل اكتمال التحليل الحالي
     @Volatile private var isAnalyzing = false
     private val safeRequired = 3
     private var safeCount    = 0
@@ -136,74 +123,55 @@ class ScreenMonitorService : Service() {
         return START_NOT_STICKY
     }
 
-   private fun startMonitoring(resultCode: Int, resultData: Intent) {
-    if (isMonitoring) return
-    createNotificationChannel()
-    // ✅ جلسة جديدة، نسمح بكل مراحل التراجع (Fallback) من جديد إن لزم
-    rateLimitFallbackTriggered = false
-    backendFallbackTriggered   = false
+    private fun startMonitoring(resultCode: Int, resultData: Intent) {
+        if (isMonitoring) return
+        createNotificationChannel()
 
-    val notifText = if (useLocalAi)
-        "يتم تحليل الشاشة محلياً على جهازك."
-    else
-        "يتم تحليل الشاشة سحابياً للتجربة."
+        val notifText = if (useLocalAi)
+            "يتم تحليل الشاشة محلياً على جهازك."
+        else
+            "يتم تحليل الشاشة محلياً مع تحديد دقيق لموقع الحجب."
 
-    val notif = NotificationCompat.Builder(this, "safescreen_channel")
-        .setContentTitle("غُضُّوا — الحماية نشطة")
-        .setContentText(notifText)
-        .setSmallIcon(android.R.drawable.ic_secure)
-        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-        .setOngoing(true)
-        .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-        .build()
+        val notif = NotificationCompat.Builder(this, "safescreen_channel")
+            .setContentTitle("غُضُّوا — الحماية نشطة")
+            .setContentText(notifText)
+            .setSmallIcon(android.R.drawable.ic_secure)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOngoing(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .build()
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-        startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-    else
-        startForeground(1, notif)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        else
+            startForeground(1, notif)
 
-    overlayManager    = OverlayManager(this)
-    overlayManagerRef = overlayManager
+        overlayManager    = OverlayManager(this)
+        overlayManagerRef = overlayManager
 
-        // ✅ تهيئة المحلل المناسب حسب الوضع المختار من الواجهة
-        aiAnalyzer = if (useLocalAi) {
-            LocalAiAnalyzer(this)
+        // ✅ تهيئة المحللات حسب الوضع المختار من الواجهة
+        if (useLocalAi) {
+            // الوضع العادي: بوابة محلية فقط، بلا YOLO — حجب الشاشة كاملة عند الاشتباه
+            localGateAnalyzer = LocalAiAnalyzer(this)
+            yoloAnalyzer = null
         } else {
-               DirectOpenRouterAnalyzer(
-            openRouterApiKey,)
-        
+            // الوضع الاحترافي: بوابة محلية سريعة + YOLO محلي لتحديد موقع الحجب
+            // بدقة (كل شيء على الجهاز، بدون أي اتصال سحابي)
+            localGateAnalyzer = LocalAiAnalyzer(this)
+            yoloAnalyzer = YoloPersonAnalyzer(this)
         }
 
+        val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjection = projMgr.getMediaProjection(resultCode, resultData)
 
         if (isA12) setupVirtualDisplay12() else setupVirtualDisplay11()
 
         isMonitoring = true
         isCapturing  = true
         handler.post(captureRunnable)
-        Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — محلل محلي (LocalAiAnalyzer)"
-                          else "✅ الخدمة تعمل — يتم استخدام OpenRouter")
-    // ✅ تهيئة المحلل المناسب حسب الوضع المختار من الواجهة
-    if (useLocalAi) {
-        // مسار قديم بدون أي تعديل: محلي فقط، بدون سحابة إطلاقاً
-        aiAnalyzer = LocalAiAnalyzer(this)
-        localGateAnalyzer = null
-    } else {
-        // ✅ جديد: الوضع الهجين — بوابة محلية سريعة + سحابة كتصعيد عند الاشتباه فقط
-        localGateAnalyzer = LocalAiAnalyzer(this)
-        aiAnalyzer = DirectOpenRouterAnalyzer(openRouterApiKey)
+        Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — وضع عادي (LocalAiAnalyzer فقط)"
+                          else "✅ الخدمة تعمل — وضع احترافي: بوابة محلية + YOLO محلي لتحديد موقع الحجب")
     }
-
-    val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-    mediaProjection = projMgr.getMediaProjection(resultCode, resultData)
-
-    if (isA12) setupVirtualDisplay12() else setupVirtualDisplay11()
-
-    isMonitoring = true
-    isCapturing  = true
-    handler.post(captureRunnable)
-    Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — محلل محلي (LocalAiAnalyzer)"
-                      else "✅ الخدمة تعمل — وضع هجين: بوابة محلية سريعة + تصعيد سحابي عند الاشتباه")
-}
 
     // ✅ أبعاد الالتقاط الفعلية المستخدمة هذه الجلسة — تُحسب بحيث تحافظ على
     // نفس نسبة عرض/ارتفاع الشاشة الحقيقية (وإلا تنحرف مواقع المناطق المكتشفة
@@ -271,7 +239,7 @@ class ScreenMonitorService : Service() {
         }
     }
 
-    // دالة تحويل الصورة الافتراضية (تُستخدم من المحلل السحابي)
+    // دالة تحويل الصورة الافتراضية إلى Bitmap (تُستخدم قبل تمريرها للمحللات)
     private fun imageToBitmap(image: Image): Bitmap? {
         val planes = image.planes
         if (planes.isEmpty()) return null
@@ -288,8 +256,7 @@ class ScreenMonitorService : Service() {
     }
 
     private fun captureFrame() {
-        // ✅ لا نبدأ التقاطاً/تحليلاً جديداً قبل اكتمال السابق — يمنع تراكم
-        // طلبات OpenRouter/الباك اند المتزامنة ويحافظ على الحصة المجانية
+        // ✅ لا نبدأ التقاطاً/تحليلاً جديداً قبل اكتمال السابق
         if (isAnalyzing) {
             Log.d("Ghadhoo", "⏭️ تخطي هذا الإطار — التحليل السابق لم يكتمل بعد")
             return
@@ -314,31 +281,27 @@ class ScreenMonitorService : Service() {
             isAnalyzing = true
             serviceScope.launch {
                 try {
-                    if (useLocalAi) {
-                        // مسار قديم بدون أي تعديل: محلي فقط، بدون سحابة إطلاقاً
-                        val result = aiAnalyzer?.analyze(bitmap)
-                        applyAnalysisResult(result)
-                    } else {
-                        // ✅ جديد: المسار الهجين — بوابة محلية سريعة أولاً (كل إطار)،
-                        // والسحابة (البطيئة) لا تُستدعى إلا لو البوابة اشتبهت فعلاً.
-                        // هذا يحل مشكلة التأخير المستمر: الحالة الشائعة (آمن) سريعة
-                        // ومحلية بالكامل، والتأخير يقتصر على اللحظات النادرة اللي
-                        // فيها محتوى مشتبه به وفعلاً محتاجة تحديد موقع الحجب بدقة.
-                        val gateResult = localGateAnalyzer?.analyze(bitmap)
+                    // البوابة المحلية تعمل في كل الأحوال (عادي واحترافي)
+                    val gateResult = localGateAnalyzer?.analyze(bitmap)
 
+                    if (useLocalAi) {
+                        // الوضع العادي: البوابة هي القرار النهائي — حجب كامل عند الاشتباه
+                        applyAnalysisResult(gateResult)
+                    } else {
+                        // الوضع الاحترافي: لو البوابة قالت آمن، نكتفي بها
                         if (gateResult?.isUnsafe != true) {
-                            // البوابة المحلية قالت آمن — نكتفي بها، مفيش داعي للسحابة
                             applyAnalysisResult(gateResult)
                         } else {
-                            Log.d("Ghadhoo", "🔎 البوابة المحلية اشتبهت في محتوى غير آمن — تصعيد للسحابة لتحديد موقع الحجب...")
-                            escalateToCloud(bitmap)
+                            // اشتباه محلي → استدعاء YOLO محلياً لتحديد موقع الحجب بدقة
+                            Log.d("Ghadhoo", "🔎 البوابة المحلية اشتبهت في محتوى غير آمن — تشغيل YOLO لتحديد موقع الحجب...")
+                            runYoloLocalization(bitmap)
                         }
                     }
                 } catch (e: Exception) {
                     Log.e("Ghadhoo", "❌ خطأ غير متوقع أثناء التحليل: ${e.message}")
                 } finally {
                     if (!bitmap.isRecycled) bitmap.recycle()
-                    isAnalyzing = false // ✅ يسمح بالإطار التالي بعد اكتمال هذا تماماً
+                    isAnalyzing = false
                 }
             }
         } catch (e: Exception) {
@@ -349,16 +312,15 @@ class ScreenMonitorService : Service() {
         }
     }
 
-    // ✅ جديد: يطبّق نتيجة تحليل (محلي أو سحابي) على الـ overlay وsafeCount —
-    // منطق موحّد يستخدمه كل من المسار المحلي البحت والبوابة المحلية بالوضع
-    // الهجين، لتفادي تكرار نفس الكود في مكانين.
+    // ✅ يطبّق نتيجة تحليل (من البوابة أو من YOLO) على الـ overlay وsafeCount
     private fun applyAnalysisResult(result: AnalysisResult?) {
         val isUnsafe = result?.isUnsafe ?: false
 
         if (isUnsafe) {
             safeCount = 0
-            // ✅ نمرر المناطق المكتشفة إن وجدت (تصعيد سحابي/الباك اند) —
-            // وإن كانت null (بوابة محلية أو محلي بحت) سيُغطّى الشاشة بالكامل كالسابق
+            // نمرر المناطق المكتشفة إن وجدت (من YOLO) — وإن كانت null
+            // (بوابة محلية بحتة، أو YOLO لم يجد أشخاصاً رغم الاشتباه)
+            // تُغطّى الشاشة بالكامل كإجراء احترازي
             overlayManager?.showOverlay(result?.regions)
             Log.d("Ghadhoo", "🚨 تم التعتيم! (مناطق=${result?.regions?.size ?: "شاشة كاملة"})")
         } else {
@@ -369,33 +331,22 @@ class ScreenMonitorService : Service() {
         }
     }
 
-    // ✅ جديد: يُستدعى فقط لما البوابة المحلية تشتبه في محتوى غير آمن —
-    // يبعت نفس الإطار للسحابة (aiAnalyzer) عشان يجيب موقع الحجب الدقيق
-    // (regions)، مع نفس سلسلة التراجع القديمة (429 على كل الموديلات →
-    // الباك اند → محلي كضمانة أخيرة لو الباك اند نفسه مش متاح).
-    private suspend fun escalateToCloud(bitmap: Bitmap) {
+    // ✅ يُستدعى فقط لما البوابة المحلية تشتبه في محتوى غير آمن — يشغّل
+    // yolo11n.tflite محلياً على نفس الإطار لتحديد صناديق "شخص" بدقة.
+    // كل العملية محلية بالكامل، بلا أي اتصال شبكة.
+    private suspend fun runYoloLocalization(bitmap: Bitmap) {
         try {
-            val cloudResult = aiAnalyzer?.analyze(bitmap)
-            applyAnalysisResult(cloudResult)
-        } catch (e: RateLimitExceededException) {
-            Log.w("Ghadhoo", "🛑 RateLimitExceeded: ${e.message} — التراجع إلى الباك اند")
-            handleRateLimitFallbackToBackend()
-            // إعادة محاولة فورية بنفس الإطار الحالي بعد التحويل للباك اند،
-            // بدل انتظار دورة التقاط جديدة كاملة
-            try {
-                val fallbackResult = aiAnalyzer?.analyze(bitmap)
-                applyAnalysisResult(fallbackResult)
-            } catch (e2: Exception) {
-                Log.e("Ghadhoo", "❌ فشل التصعيد السحابي بالكامل بعد اشتباه محلي: ${e2.message}")
-                // البوابة المحلية أصلاً اشتبهت — الأمان أولاً: نعتّم الشاشة
-                // كاملة احتياطياً بدل ما نسيب المحتوى المشتبه به من غير حجب
-                overlayManager?.showOverlay(null)
-                safeCount = 0
-            }
+            val regions: List<RegionResult> = yoloAnalyzer?.detectPersons(bitmap) ?: emptyList()
+            val result = AnalysisResult(
+                isUnsafe = true,
+                regions = if (regions.isNotEmpty()) regions else null,
+                reason = "yolo_person_localization"
+            )
+            applyAnalysisResult(result)
         } catch (e: Exception) {
-            Log.e("Ghadhoo", "❌ خطأ غير متوقع أثناء التصعيد السحابي: ${e.message}")
-            // نفس المنطق: البوابة المحلية اشتبهت، فلو السحابة فشلت لأي سبب
-            // آخر (شبكة، إلخ) نعتّم احتياطياً بدل ترك المحتوى بلا حجب
+            Log.e("Ghadhoo", "❌ خطأ أثناء تحديد الموقع عبر YOLO: ${e.message}")
+            // البوابة المحلية أصلاً اشتبهت — الأمان أولاً: نعتّم الشاشة
+            // كاملة احتياطياً بدل ترك المحتوى المشتبه به بلا حجب
             overlayManager?.showOverlay(null)
             safeCount = 0
         }
@@ -426,89 +377,17 @@ class ScreenMonitorService : Service() {
 
         overlayManager?.removeOverlay()
 
-        aiAnalyzer?.close()
-        aiAnalyzer        = null
-
-        // ✅ جديد: إغلاق وتصفير البوابة المحلية (الوضع الهجين)
         localGateAnalyzer?.close()
         localGateAnalyzer = null
+
+        yoloAnalyzer?.close()
+        yoloAnalyzer = null
 
         overlayManagerRef = null
         overlayManager    = null
 
         stopForeground(true)
         stopSelf()
-    }
-
-    // ✅ يُستدعى عند رصد RateLimitExceededException من DirectOpenRouterAnalyzer
-    // (تجاوز الحصة المجانية اليومية لكل الموديلات المُجرَّبة في OpenRouter):
-    // يُبدّل المحلل النشط فوراً إلى BackendApiAi (سيرفرنا على Render) لباقي
-    // الجلسة، ويُحدّث إشعار الخدمة لإبلاغ المستخدم.
-    //
-    // ملاحظة: BackendApiAi.analyze() لا يرمي أي استثناء أبداً (يلتقط كل
-    // الأخطاء داخلياً ويرجع AnalysisResult(false) كـ fail-safe) — لذلك هو
-    // "المحطة الأخيرة" الآمنة في سلسلة التراجع، ولا حاجة لالتقاط استثناء
-    // منه هنا تحديداً.
-    private fun handleRateLimitFallback() = handleRateLimitFallbackToBackend()
-
-    private fun handleRateLimitFallbackToBackend() {
-        if (rateLimitFallbackTriggered) return // لا نكرر التبديل/الإشعار
-        rateLimitFallbackTriggered = true
-
-        try {
-            aiAnalyzer?.close()
-        } catch (_: Exception) { /* تجاهل أي خطأ إغلاق غير مهم هنا */ }
-
-        aiAnalyzer = BackendApiAi(baseUrl = backendBaseUrl, appApiKey = backendAppKey)
-        Log.w("Ghadhoo", "🔄 تم التبديل تلقائياً إلى الباك اند (BackendApiAi) بسبب تجاوز الحصة السحابية على OpenRouter")
-
-        updateNotification(
-            "تم تجاوز الحد المجاني اليومي — تم التحويل لسيرفرنا الاحتياطي تلقائياً"
-        )
-
-        // ✅ فحص اختياري: تأكد إن الباك اند فعلاً متاح، وإلا تراجع أخيراً
-        // للمحلل المحلي حتى لا تنقطع الحماية بالكامل (مثلاً لو Render واقف
-        // أو لسه "نايم" على الخطة المجانية ولم يستجب في الوقت المناسب)
-        serviceScope.launch {
-            val backend = aiAnalyzer as? BackendApiAi ?: return@launch
-            val healthy = try { backend.checkHealth() } catch (_: Exception) { false }
-            if (!healthy) {
-                handleBackendUnavailableFallback()
-            }
-        }
-    }
-
-    // ✅ يُستدعى فقط لو الباك اند نفسه غير متاح بعد التحويل إليه — تراجع
-    // أخير للمحلل المحلي كضمانة أخيرة لاستمرار الحماية
-    private fun handleBackendUnavailableFallback() {
-        if (backendFallbackTriggered) return
-        backendFallbackTriggered = true
-
-        try {
-            aiAnalyzer?.close()
-        } catch (_: Exception) { /* تجاهل */ }
-
-        aiAnalyzer = LocalAiAnalyzer(this)
-        Log.w("Ghadhoo", "🔄 الباك اند غير متاح أيضاً — تم التبديل النهائي إلى المحلل المحلي")
-
-        updateNotification(
-            "تعذّر الوصول للسيرفر الاحتياطي — تم التحويل للتحليل المحلي"
-        )
-    }
-
-    // ✅ يُحدّث نص الإشعار القائم بدون الحاجة لإعادة إنشاء الخدمة بالكامل
-    private fun updateNotification(text: String) {
-        val notif = NotificationCompat.Builder(this, "safescreen_channel")
-            .setContentTitle("غُضُّوا — الحماية نشطة")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_secure)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setOngoing(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
-
-        val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(1, notif)
     }
 
     private fun createNotificationChannel() {
