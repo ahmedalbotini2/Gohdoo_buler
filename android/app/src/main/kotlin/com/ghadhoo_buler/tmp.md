@@ -1,4 +1,4 @@
-package com.ghadhoo_buler
+/*package com.ghadhoo_buler
 
 import android.content.Context
 import android.graphics.Color
@@ -23,33 +23,9 @@ class OverlayManager(private val context: Context) {
     private var overlayParams: WindowManager.LayoutParams? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ✅ نتذكر آخر المناطق المعروضة حتى نقدر نعيد بناءها عند تغيير
+    // ✅ جديد: نتذكر آخر المناطق المعروضة حتى نقدر نعيد بناءها عند تغيير
     // اللون/شدة البلور بدون الحاجة لنتيجة تحليل جديدة
     private var currentRegions: List<RegionResult>? = null
-
-    // ✅ هل النظام يدعم فعلياً "البلور المتقاطع بين النوافذ" في اللحظة الحالية؟
-    private var crossWindowBlurEnabled = false
-
-    init {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            crossWindowBlurEnabled = try {
-                windowManager.isCrossWindowBlurEnabled
-            } catch (e: Exception) {
-                false
-            }
-            try {
-                windowManager.addCrossWindowBlurEnabledListener(
-                    { command -> mainHandler.post(command) }
-                ) { enabled ->
-                    crossWindowBlurEnabled = enabled
-                    Log.d("Ghadhoo", "ℹ️ دعم البلور المتقاطع بين النوافذ الآن: $enabled")
-                    if (overlayView != null) rebuildOverlayViews()
-                }
-            } catch (e: Exception) {
-                Log.e("Ghadhoo", "❌ addCrossWindowBlurEnabledListener: ${e.message}")
-            }
-        }
-    }
 
     val isOverlayVisible: Boolean get() = overlayView != null
 
@@ -88,7 +64,7 @@ class OverlayManager(private val context: Context) {
     // ── showOverlay ──────────────────────────────────────────────────────────
     // regions == null أو فاضية → يغطي الشاشة بالكامل (السلوك الافتراضي القديم،
     // يُستخدم مع المحلل المحلي الذي لا يحدد مواقع).
-    // regions غير فاضية → يحجب فقط تلك المناطق بدقة (يُستخدم مع محلل YOLO).
+    // regions غير فاضية → يحجب فقط تلك المناطق بدقة (يُستخدم مع المحلل السحابي).
     fun showOverlay(regions: List<RegionResult>? = null) {
         mainHandler.post {
             currentRegions = regions
@@ -150,59 +126,37 @@ class OverlayManager(private val context: Context) {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    // حجب مناطق محددة فقط
+    // حجب مناطق محددة فقط (Android 12+: بلور حقيقي خلف كل منطقة عبر
+    // FLAG_BLUR_BEHIND على نافذة كاملة + قص بصري بواسطة view مموّه محلي
+    // كحل أبسط ومتوافق مع كل الإصدارات: نستخدم لون/تمويه صلب على نفس
+    // أبعاد المنطقة فقط بدل الشاشة كاملة)
     // ════════════════════════════════════════════════════════════════════
     private fun buildRegionOverlays(container: FrameLayout, regions: List<RegionResult>) {
         val (screenW, screenH) = screenSize()
         val pad = regionPaddingPx
 
-        // ✅ حماية: لو overlayColor وصل بدون بايت الشفافية (alpha=0) — مثلاً
-        // بسبب لون مُمرَّر من Flutter بصيغة 0xRRGGBB بدل 0xAARRGGBB — فالصندوق
-        // يُرسم لكن يكون شفافاً بالكامل وغير مرئي إطلاقاً، رغم أن كل منطق
-        // الكشف والتعتيم يعمل بشكل صحيح (بالضبط عرض "اكتشف بس ما ظلّل").
-        // نضمن حد أدنى مرئي من الشفافية بدل السماح باختفاء الصندوق كلياً.
-        val safeColor = if ((overlayColor ushr 24) == 0) {
-            Log.w("Ghadhoo", "⚠️ overlayColor بلا شفافية (alpha=0) — استخدام قيمة احتياطية مرئية")
-            (overlayColor and 0x00FFFFFF) or (0xCC shl 24) // نفس اللون لكن بشفافية آمنة
-        } else {
-            overlayColor
-        }
-
         for (region in regions) {
             val r: RectF = region.bounds // نسب 0f..1f (left, top, right, bottom)
 
-            var leftPx   = (r.left   * screenW).toInt() - pad
-            var topPx    = (r.top    * screenH).toInt() - pad
-            var rightPx  = (r.right  * screenW).toInt() + pad
-            var bottomPx = (r.bottom * screenH).toInt() + pad
-
-            // ✅ تقييد الإحداثيات ضمن حدود الشاشة الفعلية — يمنع فشل الرسم أو
-            // ظهور صندوق بحجم شبه معدوم إذا خرجت النسب المحسوبة قليلاً عن 0..1
-            leftPx   = leftPx.coerceIn(0, screenW)
-            topPx    = topPx.coerceIn(0, screenH)
-            rightPx  = rightPx.coerceIn(0, screenW)
-            bottomPx = bottomPx.coerceIn(0, screenH)
+            val leftPx   = (r.left   * screenW).toInt() - pad
+            val topPx    = (r.top    * screenH).toInt() - pad
+            val rightPx  = (r.right  * screenW).toInt() + pad
+            val bottomPx = (r.bottom * screenH).toInt() + pad
 
             val w = (rightPx - leftPx).coerceAtLeast(1)
             val h = (bottomPx - topPx).coerceAtLeast(1)
-
-            Log.d(
-                "Ghadhoo",
-                "🟦 صندوق حجب: left=$leftPx top=$topPx w=$w h=$h " +
-                    "(شاشة=${screenW}x${screenH}) لون=${Integer.toHexString(safeColor)}"
-            )
 
             val regionView = View(context).apply {
                 background = GradientDrawable().apply {
                     shape        = GradientDrawable.RECTANGLE
                     cornerRadius = cornerPx
-                    setColor(safeColor)
+                    setColor(overlayColor)
                 }
             }
 
             val lp = FrameLayout.LayoutParams(w, h).apply {
-                leftMargin = leftPx
-                topMargin  = topPx
+                leftMargin = leftPx.coerceIn(0, screenW)
+                topMargin  = topPx.coerceIn(0, screenH)
                 gravity    = Gravity.TOP or Gravity.START
             }
 
@@ -210,21 +164,18 @@ class OverlayManager(private val context: Context) {
         }
     }
 
-    // ── السلوك القديم: تغطية الشاشة بالكامل (بدون مناطق محددة) ─────────────
+    // ── السلوك القديم: تغطية الشاشة بالكامل (للمحلل المحلي بدون مناطق) ─────
     private fun buildFullScreenOverlay(container: FrameLayout) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (crossWindowBlurEnabled) {
-                container.setBackgroundColor(0x55000000.toInt())
-                applyBlurFlagToWindow()
-            } else {
-                removeBlurFlagFromWindow()
-                container.setBackgroundColor(0x55000000.toInt())
-            }
+            container.setBackgroundColor(0x55000000.toInt())
+            applyBlurFlagToWindow()
         } else {
             buildColorOverlay(container)
         }
     }
 
+    // Android 12+: نفعّل FLAG_BLUR_BEHIND على مستوى النافذة كلها فقط في
+    // حالة التغطية الكاملة (لا يصلح هذا الفلاغ لتمويه مناطق جزئية فقط)
     private fun applyBlurFlagToWindow() {
         val params = overlayParams ?: return
         val view   = overlayView   ?: return
@@ -266,14 +217,15 @@ class OverlayManager(private val context: Context) {
     }
 
     private fun applyColorToCurrentOverlay() {
+        // يُطبَّق على كل عناصر الحجب الحالية (مناطق أو شاشة كاملة) بإعادة بنائها
         if (overlayView == null) return
         rebuildOverlayViews()
     }
 
     private fun applyBlurToCurrentOverlay() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-        if (!crossWindowBlurEnabled) return
         val regions = currentRegions
+        // البلور الكامل (FLAG_BLUR_BEHIND) يُحدَّث فقط في حالة التغطية الكاملة
         if (regions == null || regions.isEmpty()) {
             val params = overlayParams ?: return
             val view   = overlayView   ?: return
@@ -281,6 +233,9 @@ class OverlayManager(private val context: Context) {
             try { windowManager.updateViewLayout(view, params) }
             catch (e: Exception) { Log.e("Ghadhoo", "❌ updateViewLayout: ${e.message}") }
         }
+        // في حالة المناطق المحددة لا حاجة لإعادة شيء، لأنها تستخدم overlayColor فقط
+        // (التمويه الجزئي الحقيقي لمناطق صغيرة عبر BackdropFilter غير مدعوم على
+        // مستوى WindowManager بدون تعقيد إضافي؛ نستخدم لوناً صلباً بدله حالياً)
     }
 
     // ── removeOverlay ────────────────────────────────────────────────────────
@@ -297,4 +252,4 @@ class OverlayManager(private val context: Context) {
             }
         }
     }
-}
+}*/

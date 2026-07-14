@@ -30,7 +30,7 @@ class SafeScreenApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title:'غُضُّوا',
-      debugShowCheckedModeBanner: false,
+      debugShowCheckedModeBanner: true,
       theme: ThemeData(
         colorScheme: ColorScheme.dark(
           primary:   const Color(0xFFD4AF37), 

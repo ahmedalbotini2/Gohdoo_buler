@@ -73,23 +73,30 @@ class YoloPersonAnalyzer(private val context: Context) {
     suspend fun detectPersons(bitmap: Bitmap): List<RegionResult> = withContext(Dispatchers.Default) {
         if (!isReady || compiledModel == null) return@withContext emptyList<RegionResult>()
 
-        var scaled: Bitmap? = null
+        var letterboxed: Bitmap? = null
         return@withContext try {
-            scaled = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
-            val rawBoxes = runInference(scaled)
+            val lb = letterboxResize(bitmap)
+            letterboxed = lb.bitmap
+            val rawBoxes = runInference(lb.bitmap)
             val personBoxes = rawBoxes.filter { it.classId == personClassId }
             val finalBoxes = nonMaxSuppression(personBoxes, iouThreshold)
 
             Log.d("GhadhooAI", "🧍 [YOLO] تم اكتشاف ${finalBoxes.size} شخص/أشخاص")
 
             finalBoxes.map { box ->
-                val left   = (box.cx - box.w / 2f).coerceIn(0f, 1f)
-                val top    = (box.cy - box.h / 2f).coerceIn(0f, 1f)
-                val right  = (box.cx + box.w / 2f).coerceIn(0f, 1f)
-                val bottom = (box.cy + box.h / 2f).coerceIn(0f, 1f)
+                // ✅ إحداثيات الصندوق قادمة نسبةً لصورة letterbox المربعة
+                // (640×640 بحشو رمادي) — لازم نحوّلها أولاً لنسب الصورة
+                // الأصلية (قبل الحشو والتصغير) عبر عكس عملية letterbox
+                val (left, top, right, bottom) = lb.unletterbox(
+                    box.cx - box.w / 2f, box.cy - box.h / 2f,
+                    box.cx + box.w / 2f, box.cy + box.h / 2f
+                )
                 RegionResult(
                     label = "person",
-                    bounds = RectF(left, top, right, bottom),
+                    bounds = RectF(
+                        left.coerceIn(0f, 1f), top.coerceIn(0f, 1f),
+                        right.coerceIn(0f, 1f), bottom.coerceIn(0f, 1f)
+                    ),
                     confidence = box.conf
                 )
             }
@@ -97,11 +104,57 @@ class YoloPersonAnalyzer(private val context: Context) {
             Log.e("GhadhooAI", "❌ [YOLO] خطأ أثناء التحليل: ${e.message}")
             emptyList<RegionResult>()
         } finally {
-            scaled?.recycle()
+            letterboxed?.recycle()
         }
     }
 
-    // ── تمثيل داخلي لصندوق خام قبل NMS ───────────────────────────────────
+    // ── Letterbox: يحافظ على تناسق الأبعاد الأصلي ثم يحشو بلون رمادي
+    // (114,114,114 — نفس لون الحشو المستخدم أثناء تدريب Ultralytics) ليصبح
+    // الناتج مربعاً inputWidth×inputHeight بدون أي تشويه للصورة. هذا يطابق
+    // بالضبط أسلوب المعالجة المسبقة الذي تدرّب عليه النموذج، على عكس الضغط
+    // المباشر (squish) الذي يشوّه الأشخاص القريبين من الحواف ويربك التموضع.
+    private fun letterboxResize(src: Bitmap): LetterboxData {
+        val srcW = src.width.toFloat()
+        val srcH = src.height.toFloat()
+        val scale = min(inputWidth / srcW, inputHeight / srcH)
+        val newW = (srcW * scale).toInt().coerceAtLeast(1)
+        val newH = (srcH * scale).toInt().coerceAtLeast(1)
+        val padX = (inputWidth - newW) / 2f
+        val padY = (inputHeight - newH) / 2f
+
+        val resized = Bitmap.createScaledBitmap(src, newW, newH, true)
+        val canvasBitmap = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(canvasBitmap)
+        canvas.drawColor(android.graphics.Color.rgb(114, 114, 114)) // لون الحشو القياسي في Ultralytics
+        canvas.drawBitmap(resized, padX, padY, null)
+        if (resized !== src) resized.recycle()
+
+        return LetterboxData(canvasBitmap, scale, padX, padY)
+    }
+
+    private class LetterboxData(
+        val bitmap: Bitmap,
+        val scale: Float,
+        val padX: Float,
+        val padY: Float
+    ) {
+        // يحوّل مستطيلاً مُطبَّعاً (0..1) نسبةً لصورة letterbox 640×640،
+        // إلى مستطيل مُطبَّع (0..1) نسبةً للصورة الأصلية قبل الحشو والتصغير
+        fun unletterbox(left: Float, top: Float, right: Float, bottom: Float): FloatArray {
+            val inputW = bitmap.width.toFloat()
+            val inputH = bitmap.height.toFloat()
+            // بُعد الصورة الأصلية (قبل الحشو والتصغير) بوحدات بكسل
+            val realOrigW = (inputW - 2 * padX) / scale
+            val realOrigH = (inputH - 2 * padY) / scale
+
+            fun mapX(nx: Float): Float = ((nx * inputW) - padX) / scale / realOrigW
+            fun mapY(ny: Float): Float = ((ny * inputH) - padY) / scale / realOrigH
+
+            return floatArrayOf(mapX(left), mapY(top), mapX(right), mapY(bottom))
+        }
+    }
+
+
     private data class RawBox(
         val cx: Float, val cy: Float, val w: Float, val h: Float,
         val conf: Float, val classId: Int
@@ -111,19 +164,25 @@ class YoloPersonAnalyzer(private val context: Context) {
         val inputBuffers  = compiledModel!!.createInputBuffers()
         val outputBuffers = compiledModel!!.createOutputBuffers()
 
-        // ── تحضير الإدخال: [1, 640, 640, 3] بصيغة RGB مُطبَّعة 0-1 ──────────
+        // ── تحضير الإدخال: [1, 3, 640, 640] بصيغة NCHW (planar) ─────────────
+        // ⚠️ مهم: التصدير الجديد لـ Ultralytics (LiteRT w8a32) يستخدم NCHW
+        // (كل قناة لون منفصلة بالكامل: كل قيم R ثم كل قيم G ثم كل قيم B)
+        // وليس NHWC القديم (R,G,B متتالية لكل بكسل). كتابة الإدخال بالترتيب
+        // الخاطئ تُنتج بيانات بلا معنى بصرياً ويفشل النموذج في اكتشاف أي شيء
+        // رغم أن الاستدلال يعمل بدون أخطاء ظاهرة.
         val pixels = IntArray(inputWidth * inputHeight)
         bitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
 
-        val floatValues = FloatArray(inputWidth * inputHeight * 3)
-        var idx = 0
-        for (pixel in pixels) {
+        val channelSize = inputWidth * inputHeight
+        val floatValues = FloatArray(channelSize * 3)
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
             val r = ((pixel shr 16) and 0xFF).toFloat() / 255.0f
             val g = ((pixel shr 8)  and 0xFF).toFloat() / 255.0f
             val b = (pixel and 0xFF).toFloat() / 255.0f
-            floatValues[idx++] = r
-            floatValues[idx++] = g
-            floatValues[idx++] = b
+            floatValues[i]                   = r  // قناة R كاملة أولاً
+            floatValues[channelSize + i]     = g  // ثم قناة G كاملة
+            floatValues[channelSize * 2 + i] = b  // ثم قناة B كاملة
         }
         inputBuffers[0].writeFloat(floatValues)
         compiledModel!!.run(inputBuffers, outputBuffers)
@@ -134,37 +193,91 @@ class YoloPersonAnalyzer(private val context: Context) {
         val numAttrs = 4 + numClasses
         val numPredictions = output.size / numAttrs
 
-        val boxes = mutableListOf<RawBox>()
+        // ✅ تصحيح جوهري: الشكل الأصلي عند التصدير من PyTorch هو [1, 84, 8400]
+        // (سمة أولاً)، لكن أدوات التحويل PyTorch→TensorFlow المستخدمة داخلياً
+        // في تصدير LiteRT تُبدّل الترتيب عادة إلى [1, 8400, 84] (صندوق أولاً /
+        // channels-last) — وهو المعيار المفضّل في TensorFlow. القراءة بالترتيب
+        // الخاطئ (سمة أولاً) كانت "تخلط" قيم من صناديق مختلفة عشوائياً، فتنتج
+        // ثقات تبدو معقولة صدفة لكن إحداثيات مواقع قريبة من الصفر دائماً —
+        // بالضبط النمط اللي شفناه (صندوق 17×18px بزاوية 0,0 في كل مرة).
+        // الآن: كل صندوق i له numAttrs (84) قيمة متتالية بدءاً من i*numAttrs.
+        var maxCxSeen = 0f
         for (i in 0 until numPredictions) {
-            // التخطيط channel-first: كل خاصية مخزّنة كمصفوفة متتالية بطول numPredictions
-            val cx = output[0 * numPredictions + i]
-            val cy = output[1 * numPredictions + i]
-            val w  = output[2 * numPredictions + i]
-            val h  = output[3 * numPredictions + i]
+            val cx = output[i * numAttrs + 0]
+            if (cx > maxCxSeen) maxCxSeen = cx
+        }
+        val coordsArePixelSpace = maxCxSeen > 1.5f
+        if (coordsArePixelSpace) {
+            Log.d("GhadhooAI", "🔬 [YOLO] إحداثيات بوحدات بكسل (max cx=$maxCxSeen) — سيتم التطبيع بالقسمة على $inputWidth")
+        } else {
+            Log.d("GhadhooAI", "🔬 [YOLO] إحداثيات مُطبَّعة أصلاً (max cx=$maxCxSeen)")
+        }
+
+        val boxes = mutableListOf<RawBox>()
+        var bestPersonScoreSeen = 0f
+
+        // ✅ تشخيص دقيق: نحتفظ بالقيم الخام غير المُعالَجة (قبل أي حساب
+        // left/top/w/h) لأعلى صندوق ثقة، لتحديد ترتيب السمات الفعلي بيقين
+        // بدل الافتراض. الأنماط الشائعة المحتملة:
+        //   xywh: [cx, cy, w, h]           ← الافتراض الحالي (تقليدي/PyTorch)
+        //   yxhw: [cy, cx, h, w]           ← تحويلات TensorFlow أحياناً "y أولاً"
+        var bestRawScore = 0f
+        var bestRawAttrs = FloatArray(4)
+
+        for (i in 0 until numPredictions) {
+            val base = i * numAttrs
+            val cx = output[base + 0]
+            val cy = output[base + 1]
+            val w  = output[base + 2]
+            val h  = output[base + 3]
 
             var bestClassId = -1
             var bestScore = 0f
             for (c in 0 until numClasses) {
-                val score = output[(4 + c) * numPredictions + i]
+                val score = output[base + 4 + c]
                 if (score > bestScore) {
                     bestScore = score
                     bestClassId = c
                 }
             }
 
-            if (bestScore >= confThreshold && bestClassId == personClassId) {
+            val personScore = output[base + 4 + personClassId]
+            if (personScore > bestPersonScoreSeen) bestPersonScoreSeen = personScore
+
+            if (bestScore > bestRawScore) {
+                bestRawScore = bestScore
+                bestRawAttrs = floatArrayOf(cx, cy, w, h)
+            }
+
+            // ✅ إصلاح جوهري: نماذج YOLO الحديثة تستخدم sigmoid مستقل لكل فئة
+            // (وليس softmax تنافسي) — يعني عدة فئات قد تسجّل ثقة عالية على نفس
+            // الصندوق في آنٍ واحد. الشرط الصحيح هو فحص ثقة "شخص" مباشرة، بغض
+            // النظر عن كونها الفئة الأعلى (argmax) عند هذا الصندوق تحديداً.
+            // الشرط القديم (bestClassId == personClassId) كان يُسقط اكتشافات
+            // شخص عالية الثقة (0.994) لمجرد أن فئة أخرى تفوّقت عليها بفارق ضئيل
+            // جداً (0.996 مقابل 0.994) على نفس الصندوق.
+            if (personScore >= confThreshold) {
+                Log.d("GhadhooAI", "🧪 [BUILD-MARKER-V2] صندوق مقبول i=$i personScore=${"%.3f".format(personScore)}")
                 boxes.add(
                     RawBox(
-                        cx = cx / inputWidth,
-                        cy = cy / inputHeight,
-                        w = w / inputWidth,
-                        h = h / inputHeight,
-                        conf = bestScore,
-                        classId = bestClassId
+                        cx = if (coordsArePixelSpace) cx / inputWidth  else cx,
+                        cy = if (coordsArePixelSpace) cy / inputHeight else cy,
+                        w  = if (coordsArePixelSpace) w  / inputWidth  else w,
+                        h  = if (coordsArePixelSpace) h  / inputHeight else h,
+                        conf = personScore,
+                        classId = personClassId
                     )
                 )
             }
         }
+        Log.d("GhadhooAI", "🔬 [YOLO] أعلى ثقة person قبل الفلترة: ${"%.3f".format(bestPersonScoreSeen)} | عتبة القبول: $confThreshold")
+        Log.d(
+            "GhadhooAI",
+            "🔬 [YOLO] أفضل صندوق خام (قبل أي تحويل): " +
+                "attr0=${"%.3f".format(bestRawAttrs[0])} attr1=${"%.3f".format(bestRawAttrs[1])} " +
+                "attr2=${"%.3f".format(bestRawAttrs[2])} attr3=${"%.3f".format(bestRawAttrs[3])} " +
+                "score=${"%.3f".format(bestRawScore)}"
+        )
         return boxes
     }
 

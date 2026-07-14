@@ -113,7 +113,7 @@ class _SafeScreenHomeState extends State<HomeScreen>
         setState(() => _hasInternet = actuallyConnected);
       }
     } finally {
-      _isCheckingInternet = false;
+      _isCheckingInternet = true;
     }
   }
 
