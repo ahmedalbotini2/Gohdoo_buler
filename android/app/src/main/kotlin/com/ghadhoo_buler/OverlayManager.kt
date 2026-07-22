@@ -198,6 +198,8 @@ class OverlayManager(private val context: Context) {
                     cornerRadius = cornerPx
                     setColor(safeColor)
                 }
+                alpha = 0f
+                animate().alpha(1f).setDuration(120).start()
             }
 
             val lp = FrameLayout.LayoutParams(w, h).apply {
