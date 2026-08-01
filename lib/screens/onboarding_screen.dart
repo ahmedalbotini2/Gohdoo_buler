@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:safety_screen/res/resourse.dart';
 import 'package:safety_screen/widgets/feature_box.dart';
 import 'package:safety_screen/themes/intro_background_painter.dart';
 import 'package:safety_screen/widgets/terms_bullet.dart';
@@ -132,7 +133,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> with SingleTickerPr
   // ── 1. صفحة التعريف بالتطبيق ───────────────────────────────────────────────
   Widget _buildIntroPage() {
     return _buildPageTemplate(
-      icon: Icons.visibility_outlined,
+      image: Image.asset(ImageAppResources.onboarding),
       title: 'مرحباً بك في غُضُّوا',
       description: 'تطبيقك المساعد لغض البصر. نستخدم تقنيات الذكاء الاصطناعي لتحليل الشاشة لحظياً وحجب المحتوى غير اللائق تلقائياً، لنوفر لك بيئة تصفح نقية وآمنة.',
     );
@@ -253,21 +254,32 @@ class _OnboardingScreenState extends State<OnboardingScreen> with SingleTickerPr
 
   // ── قوالب مساعدة لبناء الواجهة ─────────────────────────────────────────────
   
-  Widget _buildPageTemplate({required IconData icon, required String title, required String description}) {
+  Widget _buildPageTemplate({ Image? image,IconData? icon, required String title, required String description}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32.0),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _gold.withValues(alpha: 0.08),
-              border: Border.all(color: _gold.withValues(alpha: 0.3), width: 1.5),
-            ),
-            child: Icon(icon, size: 80, color: _goldLight),
-          ),
+         icon != null 
+    ? Container(
+        // تصميم الأيقونة (كما هو)
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: _gold.withValues(alpha: 0.08),
+          border: Border.all(color: _gold.withValues(alpha: 0.3), width: 1.5),
+        ),
+        child: Icon(icon, size: 80, color: _goldLight),
+      )
+    : SizedBox(
+        // تصميم الصورة (بدون خلفية وبنفس الحجم الإجمالي)
+        width: 128, 
+        height: 128,
+        child: Image.asset(
+          ImageAppResources.onboarding,
+          fit: BoxFit.contain, // يمكنك تغييرها إلى BoxFit.cover إذا أردت ملء المساحة بالكامل
+        ),
+      ),
           const SizedBox(height: 40),
           Text(
             title,

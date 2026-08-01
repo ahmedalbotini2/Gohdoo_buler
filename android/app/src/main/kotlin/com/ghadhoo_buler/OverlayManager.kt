@@ -31,26 +31,28 @@ class OverlayManager(private val context: Context) {
     private var crossWindowBlurEnabled = false
 
     init {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            crossWindowBlurEnabled = try {
-                windowManager.isCrossWindowBlurEnabled
-            } catch (e: Exception) {
-                false
+    // تم التغيير هنا إلى TIRAMISU (أندرويد 13)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        crossWindowBlurEnabled = try {
+            windowManager.isCrossWindowBlurEnabled
+        } catch (e: Exception) {
+             Log.e("Ghadhoo", "❌ isCrossWindowBlurEnabled فشل: ${e.message}")
+            false
+        }
+         Log.d("Ghadhoo", "ℹ️ isCrossWindowBlurEnabled عند البدء = $crossWindowBlurEnabled | Build: ${Build.MANUFACTURER} ${Build.MODEL}")
+        try {
+            windowManager.addCrossWindowBlurEnabledListener(
+                { command -> mainHandler.post(command) }
+            ) { enabled ->
+                crossWindowBlurEnabled = enabled
+                Log.d("Ghadhoo", "ℹ️ دعم البلور المتقاطع بين النوافذ الآن: $enabled")
+                if (overlayView != null) rebuildOverlayViews()
             }
-            try {
-                windowManager.addCrossWindowBlurEnabledListener(
-                    { command -> mainHandler.post(command) }
-                ) { enabled ->
-                    crossWindowBlurEnabled = enabled
-                    Log.d("Ghadhoo", "ℹ️ دعم البلور المتقاطع بين النوافذ الآن: $enabled")
-                    if (overlayView != null) rebuildOverlayViews()
-                }
-            } catch (e: Exception) {
-                Log.e("Ghadhoo", "❌ addCrossWindowBlurEnabledListener: ${e.message}")
-            }
+        } catch (e: Exception) {
+            Log.e("Ghadhoo", "❌ addCrossWindowBlurEnabledListener: ${e.message}")
         }
     }
-
+}
     val isOverlayVisible: Boolean get() = overlayView != null
 
     var overlayColor: Int = Color.BLACK
@@ -213,19 +215,20 @@ class OverlayManager(private val context: Context) {
     }
 
     // ── السلوك القديم: تغطية الشاشة بالكامل (بدون مناطق محددة) ─────────────
-    private fun buildFullScreenOverlay(container: FrameLayout) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (crossWindowBlurEnabled) {
-                container.setBackgroundColor(0x55000000.toInt())
-                applyBlurFlagToWindow()
-            } else {
-                removeBlurFlagFromWindow()
-                container.setBackgroundColor(0x55000000.toInt())
-            }
+private fun buildFullScreenOverlay(container: FrameLayout) {
+    // تم التغيير هنا إلى TIRAMISU
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (crossWindowBlurEnabled) {
+            container.setBackgroundColor(0x55000000.toInt())
+            applyBlurFlagToWindow()
         } else {
-            buildColorOverlay(container)
+            removeBlurFlagFromWindow()
+            container.setBackgroundColor(0xFF000000.toInt())
         }
+    } else {
+        buildColorOverlay(container)
     }
+}
 
     private fun applyBlurFlagToWindow() {
         val params = overlayParams ?: return
@@ -271,20 +274,20 @@ class OverlayManager(private val context: Context) {
         if (overlayView == null) return
         rebuildOverlayViews()
     }
-
-    private fun applyBlurToCurrentOverlay() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-        if (!crossWindowBlurEnabled) return
-        val regions = currentRegions
-        if (regions == null || regions.isEmpty()) {
-            val params = overlayParams ?: return
-            val view   = overlayView   ?: return
-            params.blurBehindRadius = (blurRadius * 6).toInt().coerceIn(1, 150)
-            try { windowManager.updateViewLayout(view, params) }
-            catch (e: Exception) { Log.e("Ghadhoo", "❌ updateViewLayout: ${e.message}") }
-        }
+private fun applyBlurToCurrentOverlay() {
+    // تم التغيير هنا إلى TIRAMISU
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    if (!crossWindowBlurEnabled) return
+    
+    val regions = currentRegions
+    if (regions == null || regions.isEmpty()) {
+        val params = overlayParams ?: return
+        val view   = overlayView   ?: return
+        params.blurBehindRadius = (blurRadius * 6).toInt().coerceIn(1, 150)
+        try { windowManager.updateViewLayout(view, params) }
+        catch (e: Exception) { Log.e("Ghadhoo", "❌ updateViewLayout: ${e.message}") }
     }
-
+}
     // ── removeOverlay ────────────────────────────────────────────────────────
     fun removeOverlay() {
         mainHandler.post {

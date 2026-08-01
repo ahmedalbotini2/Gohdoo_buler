@@ -91,7 +91,7 @@ class ScreenMonitorService : Service() {
     // يظهر ثم يختفي بسرعة بسبب تذبذب ثقة الكشف حول العتبة كل إطار مستقل) →
     // 2 (التوازن الحالي: يحتاج إطارين متتاليين بلا اكتشاف قبل إزالة الحجب،
     // تأخير طفيف ~ثانية واحدة إضافية يمتص الوميض دون تأخير ملحوظ عند الانتقال).
-    private val safeRequired = 2
+    private val safeRequired = 5
     private var safeCount    = 0
 
     private var virtualDisplay11: VirtualDisplay? = null

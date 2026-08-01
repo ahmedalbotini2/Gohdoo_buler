@@ -51,7 +51,7 @@ class LocalAiAnalyzer(private val context: Context) : ContentAnalyzer {
             val score = runInference(scaled)
             Log.d("GhadhooAI", "📊 SFW=${"%.1f".format((1 - score) * 100)}% | NSFW=${"%.1f".format(score * 100)}%")
 
-            val isUnsafe = score > 0.20f
+            val isUnsafe = score > 0.30f
             if (isUnsafe) Log.w("GhadhooAI", "🚨 محتوى غير آمن!")
             else Log.d("GhadhooAI", "✅ المحتوى آمن")
 
