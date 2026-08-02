@@ -38,17 +38,21 @@ class ScreenMonitorService : Service() {
 
         // ❌ أُزيلت مفاتيح ونقاط نهاية السحابة (OpenRouter / الباك اند) —
         // لم تعد مستخدمة بعد التحويل الكامل لخط أنابيب محلي بالكامل
-        // (nsfw.tflite + yolo11n.tflite)، بلا أي اتصال إنترنت في مسار التحليل.
+        // (nsfw.tflite + yolov11_person.tflite)، بلا أي اتصال إنترنت في مسار التحليل.
 
         var isMonitoring = false
             private set
 
         // ✅ وضع المحلل — محلي (سريع/عام) افتراضيًا عند كل تشغيل للتطبيق
         // (لا يُخزَّن بين الجلسات عمداً، حتى يبدأ التطبيق دائماً بالخصوصية الكاملة أولاً)
-        //   - useLocalAi = true  → "اعتيادي": LocalAiAnalyzer فقط، يحجب الشاشة كاملة عند الاشتباه
-        //   - useLocalAi = false → "احترافي": YoloPersonAnalyzer (gohdooai.tflite) فقط،
-        //                          يعمل مباشرة على كل إطار ويحجب فقط ما يكتشفه بدقة
-        //                          (بلا بوابة، بلا اشتباه، بلا حجب احتياطي) — كله محلي بالكامل
+        //   - useLocalAi = true  → "اعتيادي": LocalAiAnalyzer فقط على الإطار كاملاً،
+        //                          يحجب الشاشة كاملة عند الاشتباه
+        //   - useLocalAi = false → "احترافي": تسلسل من مرحلتين، كله محلي بالكامل:
+        //                          1) YoloPersonAnalyzer (YOLOv11) يكتشف كل شخص في
+        //                             الإطار ويقص كل واحد إلى صورة منفصلة + إحداثياته
+        //                          2) كل صورة شخص تُصنَّف على حدة عبر LocalAiAnalyzer
+        //                             (nsfw.tflite) — فقط من كان "غير آمن" يُحجب،
+        //                             وبإحداثياته الدقيقة فقط (بلا حجب احتياطي كامل)
         var useLocalAi = true
             private set
 
@@ -56,25 +60,42 @@ class ScreenMonitorService : Service() {
         fun setBlurRadius(radius: Float) { overlayManagerRef?.blurRadius = radius }
         fun setOverlayColor(color: Int)  { overlayManagerRef?.overlayColor = color }
 
-        // ✅ يستقبل اختيار الوضع من Flutter عبر MainActivity
+        // ✅ مرجع للخدمة الحيّة (إن كانت تعمل) — يُستخدم فقط لدفع تغييرات
+        // فورية (إشعار + إعادة تهيئة المحللات) عند تبديل الوضع أثناء التشغيل.
+        // null إذا كانت الخدمة متوقفة.
+        private var instanceRef: ScreenMonitorService? = null
+
+        // ✅ يستقبل اختيار الوضع من Flutter عبر MainActivity.
+        // مهم: هذا لا يكتفي بتغيير المتغيّر الثابت — بل يدفع أيضاً إعادة
+        // تهيئة المحللات الفعلية وتحديث الإشعار *فوراً* إن كانت الخدمة
+        // تعمل حالياً، بدل الاكتفاء بتغيير القيمة وترك المحللات القديمة
+        // (وهذا كان سبب أن التبديل يظهر في الواجهة فقط بلا أثر فعلي في
+        // المنطق عند التبديل أثناء التشغيل).
         fun setAnalyzerMode(local: Boolean) {
+            val changed = useLocalAi != local
             useLocalAi = local
             Log.d("Ghadhoo", "🔄 تم تغيير وضع المحلل إلى: ${if (local) "عادي (حجب كامل)" else "احترافي (حجب دقيق محلي عبر YOLO)"}")
+
+            if (changed) {
+                // ندفع التغيير فوراً بدل انتظار الإطار التالي فقط لضمان
+                // اتساق فوري بين الإشعار وحالة المحللات مع القيمة الجديدة.
+                instanceRef?.applyModeChangeNow()
+            }
         }
     }
 
     private var mediaProjection: MediaProjection?   = null
     private var overlayManager: OverlayManager?     = null
 
-    // البوابة الأولى: تصنّف كل إطار آمن/غير آمن (nsfw.tflite)
-    // - في الوضع العادي: هي المحلل الوحيد المستخدم
-    // - في الوضع الاحترافي: ✅ لم تعد تُستخدم إطلاقاً (تبقى null) — الكاشف
-    //   الدقيق (yoloAnalyzer) يعمل مباشرة بلا بوابة تسبقه
+    // مصنّف الأمان (nsfw.tflite):
+    // - في الوضع العادي: يُستدعى مرة واحدة على الإطار كاملاً
+    // - في الوضع الاحترافي: ✅ يُستدعى بشكل منفصل لكل صورة شخص مقصوصة
+    //   يُرجعها yoloAnalyzer (تصنيف مستقل لكل شخص، وليس للإطار كاملاً)
     private var localGateAnalyzer: LocalAiAnalyzer? = null
 
-    // ✅ يشغّل gohdooai.tflite محلياً على الجهاز لتحديد صناديق الأجزاء
-    // الإباحية الصريحة داخل الصورة مباشرة على كل إطار (بلا بوابة تسبقه في
-    // الوضع الاحترافي). يبقى null في الوضع العادي — غير مستخدم هناك.
+    // ✅ يشغّل YOLOv11 محلياً على الجهاز لتحديد صندوق كل شخص في الإطار وقصّه
+    // إلى صورة منفصلة (بلا أي تصنيف أمان — هذا دور localGateAnalyzer الآن).
+    // يعمل فقط في الوضع الاحترافي؛ يبقى null في الوضع العادي.
     private var yoloAnalyzer: YoloPersonAnalyzer? = null
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -132,19 +153,7 @@ class ScreenMonitorService : Service() {
         if (isMonitoring) return
         createNotificationChannel()
 
-        val notifText = if (useLocalAi)
-            "يتم تحليل الشاشة محلياً على جهازك."
-        else
-            "يتم تحليل الشاشة محلياً مع تحديد دقيق لموقع الحجب."
-
-        val notif = NotificationCompat.Builder(this, "safescreen_channel")
-            .setContentTitle("غُضُّوا — الحماية نشطة")
-            .setContentText(notifText)
-            .setSmallIcon(android.R.drawable.ic_secure)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setOngoing(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+        val notif = buildStatusNotification()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
@@ -153,22 +162,12 @@ class ScreenMonitorService : Service() {
 
         overlayManager    = OverlayManager(this)
         overlayManagerRef = overlayManager
+        instanceRef       = this
 
-        // ✅ تهيئة المحللات حسب الوضع المختار من الواجهة
-        if (useLocalAi) {
-            // الوضع العادي: بوابة محلية فقط، بلا YOLO — حجب الشاشة كاملة عند الاشتباه
-            localGateAnalyzer = LocalAiAnalyzer(this)
-            yoloAnalyzer = null
-        } else {
-            // ✅ الوضع الاحترافي: gohdooai.tflite هو المصدر الأساسي والدقيق —
-            // يعمل مباشرة على كل إطار، وإن وجد صندوقاً، يُحجب هو فقط بدقة.
-            // localGateAnalyzer أُعيد تفعيله هنا لكن كطبقة احتياطية ثانوية
-            // فقط: يُستشار فقط عندما لا يجد الكاشف الدقيق أي صندوق، لالتقاط
-            // محتوى "خادش" (مثير لكن غير عارٍ صراحة) لا يستطيع الكاشف الدقيق
-            // كشفه أصلاً لأنه مُدرَّب فقط على أجزاء مكشوفة حرفياً.
-            localGateAnalyzer = LocalAiAnalyzer(this)
-            yoloAnalyzer = YoloPersonAnalyzer(this)
-        }
+        // ✅ تهيئة المحللات حسب الوضع المختار من الواجهة — نفس الدالة
+        // المستخدمة عند تبديل الوضع أثناء التشغيل، لضمان أن منطق التهيئة
+        // موحّد في مكان واحد فقط ولا يتكرر/يتباعد بين المسارين.
+        ensureAnalyzersMatchMode()
 
         val projMgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projMgr.getMediaProjection(resultCode, resultData)
@@ -180,6 +179,78 @@ class ScreenMonitorService : Service() {
         handler.post(captureRunnable)
         Log.d("Ghadhoo", if (useLocalAi) "✅ الخدمة تعمل — وضع عادي (LocalAiAnalyzer فقط)"
                           else "✅ الخدمة تعمل — وضع احترافي: كاشف دقيق مباشر (gohdooai.tflite) بلا بوابة")
+    }
+
+    // ── يبني إشعار الحالة الحالي بناءً على useLocalAi اللحظية ────────────
+    // مُستخدمة عند بدء الخدمة وأيضاً عند تبديل الوضع أثناء التشغيل، حتى لا
+    // يبقى نص الإشعار معبّراً عن الوضع القديم بعد التبديل.
+    private fun buildStatusNotification(): android.app.Notification {
+        val notifText = if (useLocalAi)
+            "يتم تحليل الشاشة محلياً على جهازك."
+        else
+            "يتم تحليل الشاشة محلياً مع تحديد دقيق لموقع الحجب."
+
+        return NotificationCompat.Builder(this, "safescreen_channel")
+            .setContentTitle("غُضُّوا — الحماية نشطة")
+            .setContentText(notifText)
+            .setSmallIcon(android.R.drawable.ic_secure)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOngoing(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .build()
+    }
+
+    // ── تضمن أن الكائنات الفعلية (localGateAnalyzer / yoloAnalyzer) تطابق
+    // قيمة useLocalAi الحالية. تُستدعى عند بدء المراقبة وأيضاً في كل
+    // captureFrame() كحماية إضافية — بحيث حتى لو تغيّر الوضع في اللحظة
+    // الفاصلة بين إطارين، يُعاد ضبط الكائنات فوراً بدل ترك yoloAnalyzer
+    // فارغاً (null) أثناء العمل بالوضع الاحترافي، وهو ما كان يجعل التبديل
+    // "يظهر" في المنطق (عبر قيمة useLocalAi) بلا أي أثر عملي فعلي، لأن
+    // detectPersons() على كائن null يُرجع دائماً قائمة فارغة.
+    private fun ensureAnalyzersMatchMode() {
+        if (useLocalAi) {
+            // الوضع العادي: بوابة محلية فقط على الإطار كامل، بلا YOLO
+            if (localGateAnalyzer == null) {
+                localGateAnalyzer = LocalAiAnalyzer(this)
+            }
+            if (yoloAnalyzer != null) {
+                yoloAnalyzer?.close()
+                yoloAnalyzer = null
+                Log.d("Ghadhoo", "🔄 [Mode] تحرير YoloPersonAnalyzer بعد التحول للوضع العادي")
+            }
+        } else {
+            // الوضع الاحترافي: yolo لتحديد الأشخاص + localGateAnalyzer
+            // كطبقة تصنيف لكل شخص على حدة
+            if (localGateAnalyzer == null) {
+                localGateAnalyzer = LocalAiAnalyzer(this)
+            }
+            if (yoloAnalyzer == null) {
+                yoloAnalyzer = YoloPersonAnalyzer(this)
+                Log.d("Ghadhoo", "🔄 [Mode] تهيئة YoloPersonAnalyzer بعد التحول للوضع الاحترافي")
+            }
+        }
+    }
+
+    // ── يُستدعى من setAnalyzerMode (عبر instanceRef) فور تبديل الوضع أثناء
+    // تشغيل الخدمة: يعيد ضبط المحللات فوراً بدل انتظار الإطار التالي، ويحدّث
+    // نص الإشعار الظاهر للمستخدم ليعكس الوضع الجديد فعلياً.
+    fun applyModeChangeNow() {
+        if (!isMonitoring) return
+
+        ensureAnalyzersMatchMode()
+
+        // ✅ يمنع نتيجة "قديمة" من وضع سابق (مثلاً منطقة محجوبة من الوضع
+        // الاحترافي) من الظهور أثناء الوضع الجديد قبل وصول أول تحليل جديد
+        safeCount = 0
+        overlayManager?.removeOverlay()
+
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(1, buildStatusNotification())
+            Log.d("Ghadhoo", "🔔 تم تحديث نص الإشعار بعد تبديل الوضع")
+        } catch (e: Exception) {
+            Log.e("Ghadhoo", "❌ فشل تحديث الإشعار بعد تبديل الوضع: ${e.message}")
+        }
     }
 
     // ✅ أبعاد الالتقاط الفعلية المستخدمة هذه الجلسة — تُحسب بحيث تحافظ على
@@ -269,6 +340,11 @@ class ScreenMonitorService : Service() {
     }
 
     private fun captureFrame() {
+        // ✅ حماية إضافية: تضمن تطابق الكائنات مع useLocalAi اللحظية حتى لو
+        // حصل التبديل في اللحظة الفاصلة قبل وصول applyModeChangeNow(). هذا
+        // فحص رخيص (فحوصات null فقط) فلا يؤثر على الأداء.
+        ensureAnalyzersMatchMode()
+
         // ✅ لا نبدأ التقاطاً/تحليلاً جديداً قبل اكتمال السابق
         if (isAnalyzing) {
             Log.d("Ghadhoo", "⏭️ تخطي هذا الإطار — التحليل السابق لم يكتمل بعد")
@@ -299,40 +375,48 @@ class ScreenMonitorService : Service() {
                         val gateResult = localGateAnalyzer?.analyze(bitmap)
                         applyAnalysisResult(gateResult)
                     } else {
-                        // ✅ الوضع الاحترافي: gohdooai.tflite يرجع الآن صناديق
-                        // "مكشوفة" و"مغطاة" معاً (COVERED محسوبة أيضاً لكنها
-                        // كانت تُهمَل سابقاً). نصنّفها هنا:
-                        //   - وُجد صندوق EXPOSED → عري صريح → يُحجب هو فقط بدقة
-                        //   - لا EXPOSED لكن البوابة العامة اشتبهت بمحتوى خادش
-                        //     ووُجدت صناديق COVERED → نستخدمها كموقع دقيق تقريبي
-                        //     (بدل التغطية الكاملة!) — هذا يعطي دقة مكانية حتى
-                        //     للمحتوى المثير بلا نموذج مخصص
-                        //   - لا شيء من الاثنين → لا حجب إطلاقاً
-                        val allRegions: List<RegionResult> = yoloAnalyzer?.detectPersons(bitmap) ?: emptyList()
-                        val exposedRegions = allRegions.filter { YoloPersonAnalyzer.isExposedLabel(it.label) }
+                        // ✅ الوضع الاحترافي — تسلسل من مرحلتين محليتين بالكامل:
+                        //   1) yoloAnalyzer (YOLOv11) يكتشف كل شخص في الإطار
+                        //      ويقص كل واحد إلى Bitmap منفصل + إحداثياته
+                        //   2) كل صورة شخص تُرسل بشكل مستقل إلى localGateAnalyzer
+                        //      (nsfw.tflite) — حكم آمن/غير آمن خاص بها هي وحدها،
+                        //      لا علاقة له ببقية الأشخاص في نفس الإطار
+                        //   3) فقط إحداثيات الأشخاص "غير الآمنين" تُجمع وتُرسل
+                        //      للحجب — حجب دقيق بلا أي تغطية احتياطية كاملة
+                        val personCrops = yoloAnalyzer?.detectPersons(bitmap) ?: emptyList()
 
-                        if (exposedRegions.isNotEmpty()) {
-                            applyAnalysisResult(
-                                AnalysisResult(isUnsafe = true, regions = exposedRegions, reason = "yolo_exposed_detection")
-                            )
+                        if (personCrops.isEmpty()) {
+                            // لا يوجد أي شخص في الإطار أصلاً — لا شيء لحجبه
+                            applyAnalysisResult(AnalysisResult(isUnsafe = false, regions = null, reason = "no_person_detected"))
                         } else {
-                            val gateResult = localGateAnalyzer?.analyze(bitmap)
-                            if (gateResult?.isUnsafe == true) {
-                                val coveredRegions = allRegions.filter { YoloPersonAnalyzer.isCoveredLabel(it.label) }
-                                if (coveredRegions.isNotEmpty()) {
-                                    Log.d("Ghadhoo", "🔎 البوابة اشتبهت بمحتوى خادش — استخدام مواقع COVERED (${coveredRegions.size}) بدل التغطية الكاملة")
-                                    applyAnalysisResult(
-                                        AnalysisResult(isUnsafe = true, regions = coveredRegions, reason = "gate_covered_fallback")
-                                    )
-                                } else {
-                                    // البوابة اشتبهت لكن لا يوجد أي موقع (لا EXPOSED
-                                    // ولا COVERED) — نتجاهل هذا الإطار بدل تغطية
-                                    // الشاشة كاملة، حفاظاً على مبدأ "بلا حجب احتياطي"
-                                    Log.w("Ghadhoo", "⚠️ البوابة اشتبهت لكن لا يوجد أي موقع محدد — تم تجاهل هذا الإطار")
-                                    applyAnalysisResult(AnalysisResult(isUnsafe = false, regions = null, reason = "no_location_available"))
+                            val unsafeRegions = ArrayList<RegionResult>()
+                            try {
+                                for (crop in personCrops) {
+                                    val personResult = localGateAnalyzer?.analyze(crop.bitmap)
+                                    if (personResult?.isUnsafe == true) {
+                                        unsafeRegions.add(
+                                            RegionResult(
+                                                label = "UNSAFE_PERSON",
+                                                bounds = crop.bounds,
+                                                confidence = crop.confidence
+                                            )
+                                        )
+                                    }
                                 }
+                            } finally {
+                                // ✅ حاسم لتفادي تسريب الذاكرة: كل صورة شخص Bitmap
+                                // منفصلة يجب تحريرها بعد الانتهاء من تصنيفها، بغض
+                                // النظر عن نتيجتها
+                                personCrops.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+                            }
+
+                            if (unsafeRegions.isNotEmpty()) {
+                                Log.d("Ghadhoo", "🚨 ${unsafeRegions.size} من أصل ${personCrops.size} شخص غير آمن")
+                                applyAnalysisResult(
+                                    AnalysisResult(isUnsafe = true, regions = unsafeRegions, reason = "yolo_person_then_nsfw")
+                                )
                             } else {
-                                applyAnalysisResult(gateResult)
+                                applyAnalysisResult(AnalysisResult(isUnsafe = false, regions = null, reason = "all_persons_safe"))
                             }
                         }
                     }
@@ -405,6 +489,7 @@ class ScreenMonitorService : Service() {
 
         overlayManagerRef = null
         overlayManager    = null
+        instanceRef       = null
 
         stopForeground(true)
         stopSelf()

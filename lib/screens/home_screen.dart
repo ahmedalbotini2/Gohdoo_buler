@@ -190,7 +190,7 @@ class _SafeScreenHomeState extends State<HomeScreen>
     // قبل بدء أول التقاط فعلي للشاشة
     await _pushAnalyzerMode();
 
-    if (_androidVersion >= 31) {
+    if (_androidVersion >=33) {
       await _channel.invokeMethod('setBlurRadius', {'radius': _blurRadius});
     } else {
       await _channel.invokeMethod('setOverlayColor', {
@@ -598,7 +598,7 @@ class _SafeScreenHomeState extends State<HomeScreen>
 
   // ── لوحة التخصيص ──────────────────────────────────────────────────────────
   Widget _buildCustomizationPanel() {
-    if (_androidVersion >= 31) {
+    if (_androidVersion >= 33) {
       // Android 12+: شدة الـ blur
       return IslamicCard(
         title: 'شدة الضبابية',
